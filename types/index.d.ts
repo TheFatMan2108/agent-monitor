@@ -40,6 +40,7 @@ export type CodexLimits = {
   secondary: CodexWindow | null
 }
 export type CodexSummary = {
+  partial?: boolean
   folder: string
   firstAt: number | null
   lastAt: number | null
@@ -51,6 +52,7 @@ export type CodexSummary = {
   limits: CodexLimits | null
 }
 export type CodexRun = {
+  partial?: boolean
   id: string
   folder: string
   status: 'running' | 'stopped' | 'completed'
@@ -78,6 +80,7 @@ export type OfficeKind = 'main' | 'subagent' | 'codex' | 'session'
 export type OfficeStatus = AgentRow['status'] | 'stopped'
 export type OfficeSeat = { zone: OfficeZone; seat: number; firstSeen: number }
 export type OfficeAgent = OfficeSeat & {
+  partial?: boolean
   id: string
   name: string
   task: string

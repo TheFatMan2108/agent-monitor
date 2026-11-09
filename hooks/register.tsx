@@ -11,7 +11,7 @@ export { remaining } from './office'
 const PANE = 'agent-monitor'
 const MAIN = '@main'
 const CODEX = '@codex'
-const SHAPE = 'monitor-4'
+const SHAPE = 'monitor-5'
 const REF = { plugin: 'agent-monitor', key: 'monitor' } as const
 const INITIAL: MonitorState = {
   agents: [], limits: [], contextRemaining: null, feed: [], sessions: null, codex: null,
@@ -230,7 +230,7 @@ export function parseCodexRollout(text: string): CodexSummary {
   }
   let tokensAt = -Infinity
   let toolAt = -Infinity
-  // $.fs.read không có range/tail; chỉ parse toàn file khi size/mtime thay đổi.
+  // Head/tail có thể cắt giữa dòng JSON; parser bỏ dòng dở và chỉ giữ allow-list.
   let offset = 0
   while (offset < text.length) {
     const newline = text.indexOf('\n', offset)
@@ -301,7 +301,8 @@ export function codexWindowText(window: CodexWindow, now: number): string {
   return `${label} [${'█'.repeat(filled) + '░'.repeat(10 - filled)}] ${left}% còn lại · ${reset}`
 }
 
-type CodexCacheEntry = { size: number; mtime: number; summary: CodexSummary }
+type CodexCacheEntry = { size: number; mtime: number; summary: CodexSummary | null }
+const CODEX_READ_LIMIT = 4 * 1024 * 1024 - 64 * 1024
 // Chỉ summary đã lọc nằm trong bộ nhớ module; không đưa cache hay JSON gốc vào atom.
 const codexCache = new Map<string, CodexCacheEntry>()
 const CODEX_STATUS: Record<CodexRun['status'], string> = {
@@ -326,6 +327,56 @@ async function codexDirectories($: CoreEngineInterface, path: string, pattern: R
   return (await $.fs.list(path))
     .filter(entry => entry.kind === 'dir' && !entry.isLink && pattern.test(entry.name))
     .map(entry => entry.name).sort().reverse()
+}
+
+/** Dựng argv đọc 512 KiB đầu và 2 MiB cuối; chỉ gọi sau checkedStat, không qua shell ngoài Windows. */
+export function buildCodexReadArgv(path: string, windows: boolean): string[][] {
+  if (!windows) return [
+    ['head', '-c', '524288', '--', path],
+    ['tail', '-c', '2097152', '--', path],
+  ]
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)',
+    `$stream = [IO.File]::Open('${path.replace(/'/g, "''")}', 'Open', 'Read', 'ReadWrite,Delete')`,
+    'try {',
+    '  $length = $stream.Length',
+    '  $buffer = [byte[]]::new(524288)',
+    '  $count = 0',
+    '  while ($count -lt $buffer.Length) {',
+    '    $read = $stream.Read($buffer, $count, $buffer.Length - $count)',
+    '    if ($read -eq 0) { break }',
+    '    $count += $read',
+    '  }',
+    '  [Console]::Write([Text.Encoding]::UTF8.GetString($buffer, 0, $count))',
+    '  [Console]::Write("`n")',
+    '  [void]$stream.Seek([Math]::Max(0, $length - 2097152), [IO.SeekOrigin]::Begin)',
+    '  $buffer = [byte[]]::new(2097152)',
+    '  $count = 0',
+    '  while ($count -lt $buffer.Length) {',
+    '    $read = $stream.Read($buffer, $count, $buffer.Length - $count)',
+    '    if ($read -eq 0) { break }',
+    '    $count += $read',
+    '  }',
+    '  [Console]::Write([Text.Encoding]::UTF8.GetString($buffer, 0, $count))',
+    '} finally { $stream.Dispose() }',
+  ].join('\n')
+  return [['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script]]
+}
+
+async function readCodexEdges($: CoreEngineInterface, path: string): Promise<CodexSummary | null> {
+  try {
+    const windows = /^[A-Za-z]:\//.test(path) || (await $.env.get('OS')) === 'Windows_NT'
+    const chunks: string[] = []
+    for (const argv of buildCodexReadArgv(path, windows)) {
+      const result = await $.process.run(argv, { timeoutMs: 5000 })
+      if (result.exitCode !== 0 || result.isStdoutTruncated) return null
+      chunks.push(result.stdout)
+    }
+    const summary = parseCodexRollout(chunks.join('\n'))
+    summary.partial = true
+    return summary.firstAt === null || summary.lastAt === null ? null : summary
+  } catch { return null }
 }
 
 /** Chỉ list sessions/YYYY/MM/DD và đọc tối đa 8 rollout thường, không theo symlink. */
@@ -370,21 +421,34 @@ export async function readCodex($: CoreEngineInterface, home: string, now: numbe
     const runs: CodexRun[] = []
     let limits: CodexData['limits'] = null
     for (const file of newest) {
-      const stat = await checkedStat($, file.path, 'file')
-      if (!finite(stat.size) || !finite(stat.mtimeMs)) throw new Error('Thiếu metadata Codex')
-      let cached = codexCache.get(file.path)
-      if (!cached || cached.size !== stat.size || cached.mtime !== stat.mtimeMs) {
-        cached = { size: stat.size, mtime: stat.mtimeMs, summary: parseCodexRollout(await $.fs.read(file.path)) }
-        codexCache.set(file.path, cached)
-      }
-      const summary = cached.summary
-      if (summary.limits && summary.limits.updatedAt >= (limits?.updatedAt ?? -Infinity)) limits = summary.limits
-      if (summary.firstAt === null || summary.lastAt === null) continue
-      runs.push({
-        id: file.path, folder: summary.folder, status: codexStatus(summary, stat.mtimeMs, now),
-        lastTool: summary.lastTool, tools: summary.tools, tokens: summary.tokens,
-        elapsed: elapsed(summary.firstAt, summary.lastAt), lastAt: summary.lastAt,
-      })
+      try {
+        const stat = await checkedStat($, file.path, 'file')
+        if (!finite(stat.size) || !finite(stat.mtimeMs)) throw new Error('Thiếu metadata Codex')
+        let cached = codexCache.get(file.path)
+        if (!cached || cached.size !== stat.size || cached.mtime !== stat.mtimeMs) {
+          const summary = stat.size > CODEX_READ_LIMIT
+            ? await readCodexEdges($, file.path) : parseCodexRollout(await $.fs.read(file.path))
+          cached = { size: stat.size, mtime: stat.mtimeMs, summary }
+          codexCache.set(file.path, cached)
+        }
+        const summary = cached.summary
+        if (!summary) {
+          runs.push({
+            id: file.path, folder: '—', status: now - stat.mtimeMs <= 120000 ? 'running' : 'stopped',
+            lastTool: 'Chưa đọc được log', tools: 0, partial: true, tokens: null,
+            elapsed: '<1m', lastAt: stat.mtimeMs,
+          })
+          continue
+        }
+        if (summary.limits && summary.limits.updatedAt >= (limits?.updatedAt ?? -Infinity)) limits = summary.limits
+        if (summary.firstAt === null || summary.lastAt === null) continue
+        runs.push({
+          id: file.path, folder: summary.folder, status: codexStatus(summary, stat.mtimeMs, now),
+          lastTool: summary.lastTool, tools: summary.tools, tokens: summary.tokens,
+          ...(summary.partial ? { partial: true } : {}),
+          elapsed: elapsed(summary.firstAt, summary.lastAt), lastAt: summary.lastAt,
+        })
+      } catch { /* Một rollout lỗi không được che các phiên và limit còn đọc được. */ }
     }
     if (limits) {
       // Chỉ đổi atom khi cửa sổ thực sự qua giờ reset, kể cả rollout không đổi.
@@ -732,7 +796,7 @@ export const register: Register = (on, options) => {
       const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
         : agent.kind === 'subagent' ? 'Agent con Claude' : 'Phiên Claude khác'
       const status = agent.status === 'stopped' ? CODEX_STATUS.stopped : STATUS[agent.status]
-      const detail = `${agent.tool} · ${agent.tools} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
+      const detail = `${agent.tool} · ${agent.tools}${agent.partial ? '+' : ''} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
       const { fiveHourLeft, weekLeft, binding, share, account } = agent.limit
       const limitColor = binding === null ? undefined : binding < 5 ? 'error' : binding < 20 ? 'warning' : undefined
       const percent = (left: number | null, bar: boolean): string => {
@@ -823,7 +887,7 @@ export const register: Register = (on, options) => {
         <Text bold>Codex CLI</Text>
         {!state.codex?.runs.length && <Text dimColor>Chưa có hoạt động Codex</Text>}
         {state.codex?.runs.map(run => <Text>
-          {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
+          {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools}{run.partial ? '+' : ''} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
         </Text>)}
         </>}
         {e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}

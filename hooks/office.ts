@@ -81,7 +81,7 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
   for (const run of state.codex?.runs ?? []) add({
     id: `codex:${run.id}`, name: 'Codex CLI', task: run.lastTool || LABELS[run.status],
     kind: 'codex', status: run.status, lookSeed: `codex:${run.id}`, tool: run.lastTool || 'Chưa gọi công cụ',
-    tools: run.tools, elapsed: run.elapsed, tokens: run.tokens,
+    tools: run.tools, partial: run.partial, elapsed: run.elapsed, tokens: run.tokens,
     tick: run.status === 'completed' && now >= run.lastAt && now - run.lastAt < 60000,
   }, now)
   for (const session of state.sessions ?? []) {
@@ -327,7 +327,8 @@ function occupant(agent: OfficeAgent): string {
   const resting = agent.zone === 'lounge' || agent.status === 'idle' || agent.status === 'completed' || agent.status === 'killed'
   const percent = (value: number | null): string => value === null ? 'chưa rõ' : `${value}%`
   const limit = `Limit ${agent.limit.account === 'codex' ? 'Codex' : 'Claude'}: 5 giờ ${percent(agent.limit.fiveHourLeft)} · Tuần ${percent(agent.limit.weekLeft)}`
-  let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]} · ${limit}</title><g${agent.kind === 'session' ? ' opacity=".72"' : ''}>`
+  const calls = agent.kind === 'codex' && agent.partial ? ` · ${agent.tools}+ lần gọi` : ''
+  let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]}${calls} · ${limit}</title><g${agent.kind === 'session' ? ' opacity=".72"' : ''}>`
   if (resting) art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="3s" repeatCount="indefinite"/>'
   if (agent.status === 'failed') art += '<animateTransform attributeName="transform" type="translate" values="0 1;0 2;0 1" dur="3s" repeatCount="indefinite"/>'
   art += `<g transform="scale(1.5)">${character(agent.lookSeed, agent.kind, agent.parentSeed, false, true, agent.status === 'failed')}</g>`

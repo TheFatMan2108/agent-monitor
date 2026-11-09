@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
 import type { MonitorState } from '../types'
-import { otherSessions, remaining, resetText, taskPids, register, parseCodexRollout, codexWindowText, codexStatus, readCodex } from './register'
+import { otherSessions, remaining, resetText, taskPids, register, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
 import { buildScene, renderOfficeSvg } from './office'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
@@ -41,7 +41,7 @@ function setup(on: On, options: {
   let seeded: MonitorState | undefined
   on('state.get', async (_, e, next) => {
     const result = await next(e)
-    return seeded ? { ...result, value: { ...result.value, value: { shape: 'monitor-4', value: seeded } } } : result
+    return seeded ? { ...result, value: { ...result.value, value: { shape: 'monitor-5', value: seeded } } } : result
   })
   on('state.set', async (_, e, next) => {
     const result = await next(e)
@@ -454,6 +454,7 @@ function codexFixture(home: string, files: RolloutFile[]) {
   const lists: string[] = []
   const reads: string[] = []
   const stats: string[] = []
+  const processes: { argv: readonly string[]; timeoutMs?: number }[] = []
   const directories = new Map<string, FsEntry[]>()
   const byPath = new Map<string, RolloutFile>()
   const sessions = `${home}/sessions`
@@ -478,6 +479,19 @@ function codexFixture(home: string, files: RolloutFile[]) {
     entries.push({ name: '2024', kind: 'dir', size: 0, mtimeMs: 0, isLink: true })
   }
   const api = {
+    env: { get: async () => undefined },
+    process: {
+      run: async (argv: readonly string[], init?: { timeoutMs?: number }) => {
+        processes.push({ argv: [...argv], timeoutMs: init?.timeoutMs })
+        const entry = [...byPath].find(([path]) => argv[argv.length - 1] === path
+          || (argv[0] === 'powershell.exe' && argv[4].includes(`::Open('${path.replace(/'/g, "''")}',`)))
+        expect(entry !== undefined).toBe(true)
+        expect(stats.includes(entry![0])).toBe(true)
+        const chunks = entry![1].text.split('\nCUT\n')
+        const stdout = argv[0] === 'head' ? chunks[0] : argv[0] === 'tail' ? chunks[1] ?? '' : chunks.join('\n')
+        return { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+      },
+    },
     fs: {
       list: async (path?: string) => {
         lists.push(path ?? '')
@@ -502,7 +516,7 @@ function codexFixture(home: string, files: RolloutFile[]) {
       },
     },
   } as unknown as CoreEngineInterface
-  return { api, lists, reads, stats, directories, byPath }
+  return { api, lists, reads, stats, processes, directories, byPath }
 }
 
 test('rollout bỏ dòng rác và shape lạ, chỉ giữ trường allow-list', () => {
@@ -635,30 +649,207 @@ test('Codex giới hạn 4 ngày, 8 rollout mới nhất và 3 phiên đã kết
   expect((await readCodex(old.api, '/codex-old-test', NOW))?.runs).toEqual([])
 })
 
-test('lỗi filesystem hoặc đường dẫn link Codex ẩn dữ liệu, không đọc file khác', async () => {
+test('lỗi listing ẩn Codex; lỗi đọc, parse hoặc link từng file không che phiên và limit khác', async () => {
   const file = { name: 'rollout-fail.jsonl', text: codexLine('event_msg', { type: 'task_started' }), mtime: NOW }
   const listing = codexFixture('/codex-fail-list', [file])
   listing.api.fs.list = async () => { throw new Error('list lỗi') }
   expect(await readCodex(listing.api, '/codex-fail-list', NOW)).toBe(null)
-  const reading = codexFixture('/codex-fail-read', [file])
-  reading.api.fs.read = (async () => { throw new Error('read lỗi') }) as CoreEngineInterface['fs']['read']
-  expect(await readCodex(reading.api, '/codex-fail-read', NOW)).toBe(null)
+  const reading = codexFixture('/codex-fail-read', [file, {
+    name: 'rollout-good.jsonl', mtime: NOW - 1,
+    text: [codexLine('event_msg', { type: 'task_started' }),
+      codexLine('event_msg', { type: 'token_count', rate_limits: codexLimits(23) })].join('\n'),
+  }, { name: 'rollout-broken.jsonl', mtime: NOW - 2, text: '{broken' }])
+  const read = reading.api.fs.read
+  reading.api.fs.read = (async (path: string) => {
+    if (path.endsWith(file.name)) throw new Error('read lỗi')
+    return read(path)
+  }) as CoreEngineInterface['fs']['read']
+  const result = await readCodex(reading.api, '/codex-fail-read', NOW)
+  expect(result?.runs.map(run => run.id.split('/').pop())).toEqual(['rollout-good.jsonl'])
+  expect(result?.limits?.primary?.usedPercent).toBe(23)
+  expect(reading.processes).toEqual([])
   const alias = codexFixture('/codex-alias-test', [file])
   const stat = alias.api.fs.stat
   alias.api.fs.stat = async (path, options) => ({
     ...await stat(path, options), ...(path.endsWith('.jsonl') ? { realPath: '/private/auth.json' } : {}),
   })
-  expect(await readCodex(alias.api, '/codex-alias-test', NOW)).toBe(null)
+  expect(await readCodex(alias.api, '/codex-alias-test', NOW)).toEqual({ limits: null, runs: [] })
   expect(alias.reads).toEqual([])
   expect(await readCodex(alias.api, '//server/share', NOW)).toBe(null)
   expect(await readCodex(alias.api, '/codex/../private', NOW)).toBe(null)
 })
 
-function mockCodexFiles(on: On, fixture: ReturnType<typeof codexFixture>): void {
+function mockCodexFiles(on: On, fixture: ReturnType<typeof codexFixture>, withProcess = false): void {
   on('fs.list', async (_, e) => ({ value: await fixture.api.fs.list(e.path?.replace(/\\/g, '/')) }))
   on('fs.stat', async (_, e) => ({ value: await fixture.api.fs.stat(e.path.replace(/\\/g, '/'), { resolve: e.resolve ?? false }) }))
   on('fs.read', async (_, e) => ({ value: await fixture.api.fs.read(e.path.replace(/\\/g, '/')) }))
+  if (withProcess) on('process.run', async (_, e) => ({ value: await fixture.api.process.run(e.argv, e.init) }))
 }
+
+test('argv Windows giữ UTF-8, shared read, đúng head/tail và escape dấu nháy đơn trong path', () => {
+  const path = "C:/người dùng/O'Brien/sessions/2026/11/09/rollout-run.jsonl"
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)',
+    "$stream = [IO.File]::Open('C:/người dùng/O''Brien/sessions/2026/11/09/rollout-run.jsonl', 'Open', 'Read', 'ReadWrite,Delete')",
+    'try {',
+    '  $length = $stream.Length',
+    '  $buffer = [byte[]]::new(524288)',
+    '  $count = 0',
+    '  while ($count -lt $buffer.Length) {',
+    '    $read = $stream.Read($buffer, $count, $buffer.Length - $count)',
+    '    if ($read -eq 0) { break }',
+    '    $count += $read',
+    '  }',
+    '  [Console]::Write([Text.Encoding]::UTF8.GetString($buffer, 0, $count))',
+    '  [Console]::Write("`n")',
+    '  [void]$stream.Seek([Math]::Max(0, $length - 2097152), [IO.SeekOrigin]::Begin)',
+    '  $buffer = [byte[]]::new(2097152)',
+    '  $count = 0',
+    '  while ($count -lt $buffer.Length) {',
+    '    $read = $stream.Read($buffer, $count, $buffer.Length - $count)',
+    '    if ($read -eq 0) { break }',
+    '    $count += $read',
+    '  }',
+    '  [Console]::Write([Text.Encoding]::UTF8.GetString($buffer, 0, $count))',
+    '} finally { $stream.Dispose() }',
+  ].join('\n')
+  expect(buildCodexReadArgv(path, true)).toEqual([
+    ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+  ])
+  expect(buildCodexReadArgv("/home/O'Brien/rollout-run.jsonl", false)).toEqual([
+    ['head', '-c', '524288', '--', "/home/O'Brien/rollout-run.jsonl"],
+    ['tail', '-c', '2097152', '--', "/home/O'Brien/rollout-run.jsonl"],
+  ])
+})
+
+test('rollout lớn dùng process sau stat, parse head/tail, cache size/mtime và chỉ lưu allow-list', async () => {
+  const secret = 'TAIL_MESSAGE_ARGUMENT_SECRET'
+  const home = "C:/người dùng/O'Brien/codex-large-test"
+  const file = {
+    name: "rollout-O'Brien.jsonl", mtime: NOW, size: 9942134,
+    text: [
+      codexLine('session_meta', { cwd: 'C:/work/Trò chơi', instructions: secret }, NOW - 180000),
+      codexLine('event_msg', { type: 'task_started' }, NOW - 120000),
+      '{"cut_head":', 'CUT', 'broken_tail"}',
+      codexLine('response_item', { type: 'message', content: secret }),
+      codexLine('response_item', { type: 'function_call', name: 'exec_command', arguments: secret }),
+      codexLine('event_msg', { type: 'token_count', rate_limits: codexLimits(33),
+        info: { total_token_usage: { total_tokens: 12345 } }, message: secret }),
+      codexLine('event_msg', { type: 'task_complete', message: secret }),
+    ].join('\n'),
+  }
+  const fixture = codexFixture(home, [file, {
+    name: 'rollout-small.jsonl', mtime: NOW - 1,
+    text: codexLine('event_msg', { type: 'token_count', rate_limits: codexLimits(99) }, NOW - 1000),
+  }])
+  const result = await readCodex(fixture.api, home, NOW)
+  const path = `${home}/sessions/2026/11/09/${file.name}`
+  expect(fixture.processes).toEqual([{ argv: buildCodexReadArgv(path, true)[0], timeoutMs: 5000 }])
+  expect(fixture.reads).toEqual([`${home}/sessions/2026/11/09/rollout-small.jsonl`])
+  expect(result?.runs[0]).toEqual({ id: path, folder: 'Trò chơi', status: 'completed',
+    lastTool: 'exec_command', tools: 1, partial: true, tokens: 12345, elapsed: '0h 3m', lastAt: NOW })
+  expect(result?.limits?.primary?.usedPercent).toBe(33)
+  expect(JSON.stringify(result).includes(secret)).toBe(false)
+  expect(JSON.stringify(result).includes('arguments')).toBe(false)
+  expect(fixture.stats.some(path => /auth\.json|config\.toml/.test(path))).toBe(false)
+  expect(await readCodex(fixture.api, home, NOW + 15000)).toEqual(result)
+  expect(fixture.processes.length).toBe(1)
+  file.size++
+  await readCodex(fixture.api, home, NOW)
+  expect(fixture.processes.length).toBe(2)
+  file.mtime++
+  await readCodex(fixture.api, home, NOW)
+  expect(fixture.processes.length).toBe(3)
+})
+
+test('Unix đọc head/tail bằng argv, margin tránh fs.read gần giới hạn 4 MiB', async () => {
+  const home = '/codex-large-unix-test'
+  const fixture = codexFixture(home, [{
+    name: 'rollout-large.jsonl', mtime: NOW, size: 4 * 1024 * 1024 - 1,
+    text: [codexLine('session_meta', { cwd: '/work/日本語' }, NOW - 120000),
+      'CUT', 'broken tail', codexLine('event_msg', { type: 'task_started' }),
+      codexLine('event_msg', { type: 'token_count', rate_limits: codexLimits(19),
+        info: { total_token_usage: { total_tokens: 42 } } }),
+    ].join('\n'),
+  }])
+  const result = await readCodex(fixture.api, home, NOW)
+  const path = `${home}/sessions/2026/11/09/rollout-large.jsonl`
+  expect(fixture.reads).toEqual([])
+  expect(fixture.processes).toEqual([
+    { argv: ['head', '-c', '524288', '--', path], timeoutMs: 5000 },
+    { argv: ['tail', '-c', '2097152', '--', path], timeoutMs: 5000 },
+  ])
+  expect(result?.runs[0]?.folder).toBe('日本語')
+  expect(result?.runs[0]?.status).toBe('running')
+  expect(result?.runs[0]?.tokens).toBe(42)
+  expect(result?.runs[0]?.partial).toBe(true)
+  expect(result?.runs[0]?.elapsed).toBe('0h 2m')
+  expect(result?.limits?.primary?.usedPercent).toBe(19)
+})
+
+test('process lỗi, timeout, stdout bị cắt hoặc không parse được vẫn hiện metadata, cache không chạy lại', async () => {
+  for (const failure of ['exit', 'throw', 'truncated', 'invalid']) {
+    const home = `/codex-process-fail-${failure}`
+    const fixture = codexFixture(home, [{ name: 'rollout-large.jsonl', mtime: NOW - 120000, size: 5000000, text: '' }])
+    let calls = 0
+    fixture.api.process.run = async () => {
+      calls++
+      if (failure === 'throw') throw new Error('timeout')
+      return { exitCode: failure === 'exit' ? 1 : 0, stdout: '{broken', stderr: 'PRIVATE_ERROR',
+        isStdoutTruncated: failure === 'truncated', isStderrTruncated: false }
+    }
+    const result = await readCodex(fixture.api, home, NOW)
+    expect(result).toEqual({ limits: null, runs: [{
+      id: `${home}/sessions/2026/11/09/rollout-large.jsonl`, folder: '—', status: 'running',
+      lastTool: 'Chưa đọc được log', tools: 0, partial: true, tokens: null, elapsed: '<1m', lastAt: NOW - 120000,
+    }] })
+    const initialCalls = calls
+    expect((await readCodex(fixture.api, home, NOW + 1))?.runs[0]?.status).toBe('stopped')
+    expect(calls).toBe(initialCalls)
+    expect(fixture.reads).toEqual([])
+  }
+})
+
+test('rollout lớn không chạy process khi checkedStat phát hiện link hoặc realPath khác', async () => {
+  const home = 'C:/codex-large-link-test'
+  const fixture = codexFixture(home, [{ name: 'rollout-large.jsonl', mtime: NOW, size: 5000000, text: '' }])
+  const stat = fixture.api.fs.stat
+  fixture.api.fs.stat = async (path, options) => ({
+    ...await stat(path, options), ...(path.endsWith('.jsonl') ? { realPath: 'C:/private/auth.json', isLink: true } : {}),
+  })
+  expect(await readCodex(fixture.api, home, NOW)).toEqual({ limits: null, runs: [] })
+  expect(fixture.processes).toEqual([])
+  expect(fixture.reads).toEqual([])
+})
+
+test('card, title nhân vật và terminal hiển thị số lần gọi partial, không lưu nội dung tail vào atom', async ($, on) => {
+  const home = 'C:/codex-partial-ui-test'
+  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home } })
+  const fixture = codexFixture(home, [{
+    name: 'rollout-large.jsonl', mtime: NOW, size: 9942134,
+    text: [codexLine('session_meta', { cwd: '/work/game' }, NOW - 120000),
+      'CUT', codexLine('event_msg', { type: 'task_started', message: 'PRIVATE_TAIL' }),
+      codexLine('response_item', { type: 'function_call', name: 'apply_patch', arguments: 'PRIVATE_TAIL' }),
+    ].join('\n'),
+  }])
+  mockCodexFiles(on, fixture, true)
+  await start($)
+  await clock.settle()
+  expect(snapshot().codex?.runs[0]?.partial).toBe(true)
+  expect(JSON.stringify(snapshot()).includes('PRIVATE_TAIL')).toBe(false)
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await desktop.find({ type: 'Text', text: /^apply_patch · 1\+ lần gọi/ }))?.text)
+    .toBe('apply_patch · 1+ lần gọi · 0h 2m · Chưa rõ token')
+  expect(renderOfficeSvg(buildScene(snapshot(), NOW)).includes('1+ lần gọi')).toBe(true)
+  await desktop.unmount()
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await terminal.find({ type: 'Text', text: /game · apply_patch · 1\+ lần gọi/ }))?.text?.includes('1+ lần gọi')).toBe(true)
+  await terminal.unmount()
+  await clock.advance(15000)
+  expect(fixture.processes.length).toBe(1)
+  expect(fixture.reads).toEqual([])
+})
 
 test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và reset không hiển thị phần trăm cũ', async ($, on) => {
   let writes = 0
