@@ -19,6 +19,8 @@ Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi *
 - Claude Code: limit 5 giờ, limit tuần, thời gian đến lúc reset, và context còn lại của phiên.
 - Codex CLI: limit 5 giờ, limit tuần, gói đang dùng, và thời điểm số liệu được cập nhật.
 - Tất cả tính theo phần trăm **còn lại**. Dòng đổi màu khi còn dưới 20% và dưới 5%.
+- Mỗi nhân vật có thanh limit trên đầu, lấy theo cửa sổ gần cạn nhất của tài khoản nó dùng. Mỗi thẻ agent ghi limit 5 giờ, limit tuần và phần token agent đó chiếm.
+- Claude và Codex chỉ cấp limit theo tài khoản, nên các agent cùng tài khoản hiện cùng con số; điểm khác nhau là phần token đã dùng.
 
 **Tiến trình**
 - Agent chính và các subagent của Claude, hiển thị lồng theo quan hệ cha con: trạng thái, công cụ đang chạy, số lần gọi, thời gian, token đã dùng. Nút **Xem** mở transcript của subagent.

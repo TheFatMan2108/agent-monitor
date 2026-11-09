@@ -1,4 +1,4 @@
-import type { MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
+import type { CodexWindow, MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
 
 export type { OfficeAgent, OfficeScene } from '../types'
 
@@ -33,12 +33,35 @@ function priority(agent: OfficeAgent): number {
 
 function compareId(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0 }
 
+/** Tính phần trăm còn lại, chặn giá trị ngoài khoảng và số không hợp lệ. */
+export function remaining(used: number): number {
+  return Number.isFinite(used) ? Math.round(Math.max(0, Math.min(100, 100 - used)) * 10) / 10 : 0
+}
+
+function accountLimit(state: MonitorState, account: OfficeAgent['limit']['account'], now: number): OfficeAgent['limit'] {
+  const left = (kind: string, minutes: number): number | null => {
+    if (account === 'claude') {
+      const limit = state.limits.find(row => row.kind === kind)
+      return limit ? Math.round(remaining(limit.percentUsed)) : null
+    }
+    const window = [state.codex?.limits?.primary, state.codex?.limits?.secondary]
+      .find((item): item is CodexWindow => item?.windowMinutes === minutes)
+    if (!window || window.expired || (window.resetsAt !== undefined && window.resetsAt * 1000 <= now)) return null
+    return Math.round(remaining(window.usedPercent))
+  }
+  const fiveHourLeft = left('five_hour', 300)
+  const weekLeft = left('seven_day', 10080)
+  const binding = fiveHourLeft === null ? weekLeft : weekLeft === null ? fiveHourLeft : Math.min(fiveHourLeft, weekLeft)
+  return { account, fiveHourLeft, weekLeft, binding, share: null }
+}
+
 /** Dựng cảnh thuần dữ liệu; giữ ghế cũ và chỉ thay đổi tại các ranh giới thời gian. */
 export function buildScene(state: MonitorState, now: number): OfficeScene {
   const agents: OfficeAgent[] = []
-  const add = (agent: Omit<OfficeAgent, 'firstSeen' | 'seat' | 'zone'>, firstSeen: number): void => {
+  const limits = { claude: accountLimit(state, 'claude', now), codex: accountLimit(state, 'codex', now) }
+  const add = (agent: Omit<OfficeAgent, 'firstSeen' | 'seat' | 'zone' | 'limit'>, firstSeen: number): void => {
     const previous = state.officeSeats?.[agent.id]
-    agents.push({ ...agent, firstSeen: previous?.firstSeen ?? firstSeen,
+    agents.push({ ...agent, limit: { ...limits[agent.kind === 'codex' ? 'codex' : 'claude'] }, firstSeen: previous?.firstSeen ?? firstSeen,
       zone: agent.kind === 'main' ? 'work' : zone(agent.status), seat: -1 })
   }
   for (const row of state.agents) {
@@ -67,6 +90,13 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
       lookSeed: `session:${session.id}`, tool: session.status, tools: 0, elapsed: session.age, tokens: null,
       tick: status === 'completed' && now >= session.statusUpdatedAt && now - session.statusUpdatedAt < 60000,
     }, now)
+  }
+  // Bao gồm mọi agent có card trong scene, cả những người đang chờ ghế.
+  const tokens = { claude: 0, codex: 0 }
+  for (const agent of agents) tokens[agent.limit.account] += agent.tokens ?? 0
+  for (const agent of agents) {
+    const total = tokens[agent.limit.account]
+    agent.limit.share = agent.tokens === null || total === 0 ? null : Math.round(agent.tokens / total * 100)
   }
   const overflow = { work: 0, lounge: 0 }
   for (const area of ['work', 'lounge'] as const) {
@@ -295,7 +325,9 @@ function occupant(agent: OfficeAgent): string {
   const { x, y } = position(agent)
   const running = agent.status === 'running'
   const resting = agent.zone === 'lounge' || agent.status === 'idle' || agent.status === 'completed' || agent.status === 'killed'
-  let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]}</title><g${agent.kind === 'session' ? ' opacity=".72"' : ''}>`
+  const percent = (value: number | null): string => value === null ? 'chưa rõ' : `${value}%`
+  const limit = `Limit ${agent.limit.account === 'codex' ? 'Codex' : 'Claude'}: 5 giờ ${percent(agent.limit.fiveHourLeft)} · Tuần ${percent(agent.limit.weekLeft)}`
+  let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]} · ${limit}</title><g${agent.kind === 'session' ? ' opacity=".72"' : ''}>`
   if (resting) art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="3s" repeatCount="indefinite"/>'
   if (agent.status === 'failed') art += '<animateTransform attributeName="transform" type="translate" values="0 1;0 2;0 1" dur="3s" repeatCount="indefinite"/>'
   art += `<g transform="scale(1.5)">${character(agent.lookSeed, agent.kind, agent.parentSeed, false, true, agent.status === 'failed')}</g>`
@@ -317,9 +349,18 @@ function nameTag(agent: OfficeAgent): string {
   if (agent.kind !== 'main' && agent.kind !== 'codex') return ''
   const { x, y } = position(agent)
   const width = agent.kind === 'main' ? 38 : 32
-  const top = y + (agent.zone === 'work' ? 39 : 36)
-  return rect(x - width / 2, top, width, 6, '#f6e7c8')
-    + text(x, top + 4.5, agent.kind === 'main' ? 'Claude Code' : 'Codex CLI', '#65534b', 4.5)
+  // Plaque nằm trên mép ghế/sofa, chừa khoảng phía trên đầu của hàng kế tiếp.
+  const top = y + (agent.zone === 'work' ? 39 : 33)
+  return rect(x - width / 2, top, width, 4, '#f6e7c8')
+    + text(x, top + 3.3, agent.kind === 'main' ? 'Claude Code' : 'Codex CLI', '#65534b', 3.5)
+}
+
+function limitBar(agent: OfficeAgent): string {
+  const { x, y } = position(agent)
+  const value = agent.limit.binding
+  const width = value === null ? 0 : Math.round(16 * value / 100)
+  const color = value === null ? '#777b80' : value < 5 ? '#d86b63' : value < 20 ? '#e4b65d' : '#79b77d'
+  return `<g data-layer="limit-bar">${rect(x - 9, y - 5, 18, 4, OUTLINE)}${rect(x - 8, y - 4, 16, 2, '#777b80')}${width ? rect(x - 8, y - 4, width, 2, color) : ''}</g>`
 }
 
 function statusBubble(agent: OfficeAgent): string {
@@ -351,7 +392,7 @@ function draw(scene: OfficeScene, detail: boolean): string {
   }
   if (scene.overflow.work) art += rect(178, 194, 26, 11, '#f1deb5') + text(191, 202, `+${scene.overflow.work}`, '#765d4c', 8)
   if (scene.overflow.lounge) art += rect(286, 194, 26, 11, '#ecdfb9') + text(299, 202, `+${scene.overflow.lounge}`, '#597366', 8)
-  for (const agent of visible) art += statusBubble(agent)
+  for (const agent of visible) art += statusBubble(agent) + limitBar(agent)
   // Envelopes are the final layer, head-to-head, with a cheap soft dotted trail.
   for (const item of scene.interactions.slice(0, 6)) {
     const from = visible.find(agent => agent.id === item.from)

@@ -91,6 +91,13 @@ export type OfficeAgent = OfficeSeat & {
   elapsed: string
   tokens: number | null
   tick: boolean
+  limit: {
+    account: 'claude' | 'codex'
+    fiveHourLeft: number | null
+    weekLeft: number | null
+    binding: number | null
+    share: number | null
+  }
 }
 export type OfficeScene = {
   agents: OfficeAgent[]

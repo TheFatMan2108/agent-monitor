@@ -38,6 +38,11 @@ function setup(on: On, options: {
     return { value: usage }
   })
   let held: MonitorState | undefined
+  let seeded: MonitorState | undefined
+  on('state.get', async (_, e, next) => {
+    const result = await next(e)
+    return seeded ? { ...result, value: { ...result.value, value: { shape: 'monitor-4', value: seeded } } } : result
+  })
   on('state.set', async (_, e, next) => {
     const result = await next(e)
     if (result.value.isSet) {
@@ -46,7 +51,7 @@ function setup(on: On, options: {
     }
     return result
   })
-  return { clock, usage, snapshot: () => held! }
+  return { clock, usage, snapshot: () => held!, seed: (value: MonitorState) => { seeded = value } }
 }
 
 async function start($: Engine): Promise<void> {
@@ -820,4 +825,105 @@ test('observer Codex ghi lỗi và rethrow cùng object khi next reject', async 
     expect(held?.value.agents[0]?.active).toEqual([])
     expect(JSON.stringify(held).includes('PRIVATE_REJECTION')).toBe(false)
   }
+})
+
+test('card desktop hiển thị limit đúng tài khoản, share token riêng và dòng giải thích dùng chung', async ($, on) => {
+  const { clock, snapshot, seed } = setup(on, { agents: [
+    { id: 'child', name: 'Agent con', type: 'Explore', description: 'Đọc mã', status: 'running' },
+    { id: 'idle', name: 'Agent nghỉ', type: 'Explore', description: 'Đã đọc', status: 'idle' },
+  ], limits: [{ kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 4 }] })
+  await start($)
+  await clock.settle()
+  const data = structuredClone(snapshot())
+  data.agents.find(agent => agent.id === '@main')!.tokens = 66
+  data.agents.find(agent => agent.id === 'child')!.tokens = 34
+  data.sessions = [{ id: 'other', name: 'Phiên khác', folder: 'game', status: 'running',
+    waitingFor: '', statusUpdatedAt: NOW, age: '<1m' }]
+  data.codex = { limits: { updatedAt: NOW, plan: '', reached: false,
+    primary: { windowMinutes: 10080, usedPercent: 94 },
+    secondary: { windowMinutes: 300, usedPercent: 60 } },
+    runs: [250, 750].map((tokens, i) => ({ id: String(i), folder: 'game',
+      status: i ? 'completed' : 'running', lastTool: 'apply_patch', tools: 1, tokens, elapsed: '<1m', lastAt: NOW })) }
+  seed(data)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const claudeLine = 'Limit Claude · 5 giờ [████████░░] 76% · Tuần [██████████] 96%'
+  for (const id of ['@main', 'child', 'session:other']) {
+    const card = await ui.find({ key: `card:${id}` })
+    expect(card?.text.includes(claudeLine)).toBe(true)
+    expect(card?.text.includes('Limit Codex')).toBe(false)
+  }
+  expect((await ui.find({ key: 'card:child' }))?.text.includes('Agent này chiếm 34% token của tài khoản trong các agent đang theo dõi')).toBe(true)
+  expect((await ui.find({ key: 'card:session:other' }))?.text.includes('Agent này chiếm')).toBe(false)
+  const line = await ui.find({ type: 'Text', text: /^Limit Codex ·/ })
+  expect(line?.text).toBe('Limit Codex · 5 giờ [████░░░░░░] 40% · Tuần [█░░░░░░░░░] 6%')
+  expect(line?.props.color).toBe('warning')
+  expect((await ui.find({ key: 'card:codex:0' }))?.text.includes('Agent này chiếm 25% token của tài khoản trong các agent đang theo dõi')).toBe(true)
+  expect((await ui.find({ key: 'card:idle' }))?.text.includes(' · 5 giờ 76% · Tuần 96%')).toBe(true)
+  expect((await ui.find({ key: 'card:codex:1' }))?.text.endsWith(' · 5 giờ 40% · Tuần 6%')).toBe(true)
+  const note = await ui.find({ type: 'Text', text: /^Limit tính theo tài khoản:/ })
+  expect(note?.text).toBe('Limit tính theo tài khoản: các agent cùng tài khoản dùng chung một hạn mức.')
+  expect(note?.props.dimColor).toBe(true)
+  const texts = await ui.findAll({ type: 'Text' })
+  const heading = texts.findIndex(text => text.text.startsWith('Đang làm ·'))
+  expect(texts[heading + 1]?.text).toBe(note?.text)
+  expect((await ui.find({ type: 'Text', text: /^5 giờ \[/ }))?.text)
+    .toBe('5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset')
+  await ui.unmount()
+})
+
+test('card màu đúng ngưỡng 20/5 và ẩn phần trăm Codex hết hạn, không rõ không bịa quota', async ($, on) => {
+  const { clock, snapshot, seed } = setup(on)
+  await start($)
+  await clock.settle()
+  const data = structuredClone(snapshot())
+  data.codex = { limits: { updatedAt: NOW, plan: '', reached: false,
+    primary: { windowMinutes: 300, usedPercent: 80, resetsAt: NOW / 1000 + 60 }, secondary: null },
+    runs: ['running', 'stopped'].map((status, i) => ({ id: String(i), folder: 'game',
+      status: status as 'running' | 'stopped', lastTool: '', tools: 0, tokens: null, elapsed: '<1m', lastAt: NOW })) }
+  for (const [left, color] of [[20, undefined], [19, 'warning'], [5, 'warning'], [4, 'error']] as const) {
+    data.codex.limits!.primary!.usedPercent = 100 - left
+    seed(structuredClone(data))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const line = await ui.find({ type: 'Text', text: /^Limit Codex ·/ })
+    expect(line?.props.color).toBe(color)
+    expect(line?.text).toBe(`Limit Codex · 5 giờ [${'█'.repeat(Math.round(left / 10))}${'░'.repeat(10 - Math.round(left / 10))}] ${left}% · Tuần chưa rõ`)
+    const compact = (await ui.findAll({ type: 'Text' })).find(item => item.text === ` · 5 giờ ${left}% · Tuần chưa rõ`)
+    expect(compact?.props.color).toBe(color)
+    await ui.unmount()
+  }
+  for (const expired of [false, true]) {
+    data.codex.limits!.primary = { windowMinutes: 300, usedPercent: 14, expired,
+      resetsAt: NOW / 1000 + (expired ? 3600 : 0) }
+    seed(structuredClone(data))
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const card = await ui.find({ key: 'card:codex:0' })
+    expect(card?.text.includes('Limit Codex · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
+    expect(card?.text.includes('86%')).toBe(false)
+    expect(card?.text.includes('Agent này chiếm')).toBe(false)
+    expect((await ui.find({ type: 'Text', text: /^Limit Codex ·/ }))?.props.color).toBe(undefined)
+    expect((await ui.find({ key: 'card:codex:1' }))?.text.endsWith(' · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
+    expect((await ui.find({ key: 'card:@main' }))?.text.includes('Limit Claude · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('terminal giữ nguyên toàn bộ các dòng chữ, không thêm limit/share của card', async ($, on) => {
+  const { clock } = setup(on, { limits: [
+    { kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 4 },
+  ] })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.findAll({ type: 'Text' })).map(item => item.text)).toEqual([
+    'Limit còn lại', 'Claude Code',
+    '5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset',
+    'Tuần [██████████] 96% còn lại · Chưa rõ giờ reset',
+    'Context phiên này: 70% còn lại', 'Codex CLI', 'Chưa có dữ liệu limit Codex',
+    'Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.',
+    'Các agent', '○ Rảnh · Claude Code · ',
+    'Không có công cụ đang chạy · 0 lần gọi · <1m · 0 token',
+    'Codex CLI', 'Chưa có hoạt động Codex', 'Tương tác', 'Chưa có tương tác.',
+  ])
+  expect((await ui.findAll({ type: 'Svg' })).length).toBe(0)
+  await ui.unmount()
 })

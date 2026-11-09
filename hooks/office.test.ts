@@ -283,3 +283,135 @@ test('40 agent với tên và task rất dài vẫn dưới 131072 ký tự, c�
   expect(svg.includes('<script>')).toBe(false)
   expect(svg.includes('%')).toBe(false)
 })
+
+function accountState(): MonitorState {
+  const data = state([
+    { ...row('@main'), tokens: 66 }, { ...row('child'), tokens: 34 }, row('idle', 'idle'),
+  ])
+  data.limits = [
+    { kind: 'five_hour', percentUsed: 24.2, reset: '' },
+    { kind: 'seven_day', percentUsed: 4.1, reset: '' },
+    { kind: 'seven_day_sonnet', percentUsed: 99, reset: '' },
+  ]
+  data.sessions = [{ id: 'other', name: 'Phiên khác', folder: 'game', status: 'running',
+    waitingFor: '', statusUpdatedAt: NOW, age: '<1m' }]
+  data.codex = {
+    limits: { updatedAt: NOW, plan: '', reached: false,
+      primary: { windowMinutes: 10080, usedPercent: 61.2, resetsAt: NOW / 1000 + 3600 },
+      secondary: { windowMinutes: 300, usedPercent: 14.1, resetsAt: NOW / 1000 + 60 } },
+    runs: [250, 750, null].map((tokens, index) => ({ id: String(index), folder: 'game',
+      status: 'running', lastTool: '', tools: 0, tokens, elapsed: '<1m', lastAt: NOW })),
+  }
+  return data
+}
+
+test('limit theo tài khoản, không chia quota theo agent; token share chỉ tính trong tài khoản của scene', () => {
+  const scene = buildScene(accountState(), NOW)
+  for (const [id, share] of [['@main', 66], ['child', 34], ['idle', 0], ['session:other', null]] as const) {
+    expect(scene.agents.find(agent => agent.id === id)?.limit)
+      .toEqual({ account: 'claude', fiveHourLeft: 76, weekLeft: 96, binding: 76, share })
+  }
+  for (const [id, share] of [['codex:0', 25], ['codex:1', 75], ['codex:2', null]] as const) {
+    expect(scene.agents.find(agent => agent.id === id)?.limit)
+      .toEqual({ account: 'codex', fiveHourLeft: 86, weekLeft: 39, binding: 39, share })
+  }
+  // Agent tràn ghế vẫn có card, được tính trong mẫu số; agent rời scene thì không.
+  const data = accountState()
+  data.agents.push({ ...row('old', 'completed'), stoppedAt: NOW - 300000, tokens: 900 })
+  expect(buildScene(data, NOW).agents.find(agent => agent.id === 'child')?.limit.share).toBe(34)
+  for (const agent of data.agents) agent.tokens = 0
+  for (const run of data.codex!.runs) run.tokens = run.tokens === null ? null : 0
+  expect(buildScene(data, NOW).agents.every(agent => agent.limit.share === null)).toBe(true)
+})
+
+test('cửa sổ Codex khớp theo windowMinutes dù đổi vị trí, binding chọn số nhỏ hơn còn biết', () => {
+  const data = accountState()
+  const before = buildScene(data, NOW).agents.find(agent => agent.kind === 'codex')!.limit
+  const limits = data.codex!.limits!
+  const primary = limits.primary
+  limits.primary = limits.secondary
+  limits.secondary = primary
+  expect(buildScene(data, NOW).agents.find(agent => agent.kind === 'codex')!.limit).toEqual(before)
+  limits.primary!.usedPercent = 98
+  expect(buildScene(data, NOW).agents.find(agent => agent.kind === 'codex')!.limit.binding).toBe(2)
+  limits.secondary!.windowMinutes = 120
+  expect(buildScene(data, NOW).agents.find(agent => agent.kind === 'codex')!.limit.weekLeft).toBe(null)
+  expect(buildScene(data, NOW).agents.find(agent => agent.kind === 'codex')!.limit.binding).toBe(2)
+  data.limits = [data.limits[1]!]
+  expect(buildScene(data, NOW).agents.find(agent => agent.id === 'child')!.limit)
+    .toEqual({ account: 'claude', fiveHourLeft: null, weekLeft: 96, binding: 96, share: 34 })
+})
+
+test('cửa sổ Codex hết hạn tại reset hoặc có expired trả null, SVG không lộ phần trăm cũ', () => {
+  for (const expired of [false, true]) {
+    const data = accountState()
+    data.codex!.limits!.secondary = { windowMinutes: 300, usedPercent: 14,
+      resetsAt: NOW / 1000 + (expired ? 3600 : 0), expired }
+    let scene = buildScene(data, NOW)
+    expect(scene.agents.find(agent => agent.kind === 'codex')!.limit)
+      .toEqual({ account: 'codex', fiveHourLeft: null, weekLeft: 39, binding: 39, share: 25 })
+    expect(renderOfficeSvg(scene).includes('Limit Codex: 5 giờ chưa rõ · Tuần 39%')).toBe(true)
+    expect(renderOfficeSvg(scene).includes('86%')).toBe(false)
+    data.codex!.limits!.primary!.expired = true
+    scene = buildScene(data, NOW)
+    expect(scene.agents.find(agent => agent.kind === 'codex')!.limit.binding).toBe(null)
+    expect(renderOfficeSvg(scene).includes('Limit Codex: 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
+  }
+})
+
+test('bar 18×4, pixel nguyên, ngưỡng màu tại 20 và 5; không rõ là bar xám rỗng', () => {
+  for (const [left, width, color] of [
+    [100, 16, '#79b77d'], [76, 12, '#79b77d'], [20, 3, '#79b77d'],
+    [19, 3, '#e4b65d'], [5, 1, '#e4b65d'], [4, 1, '#d86b63'], [0, 0, null], [null, 0, null],
+  ] as const) {
+    const data = state()
+    if (left !== null) data.limits = [{ kind: 'five_hour', percentUsed: 100 - left, reset: '' }]
+    const svg = renderOfficeSvg(buildScene(data, NOW))
+    const bar = svg.match(/<g data-layer="limit-bar">(.*?)<\/g>/)![1]!
+    expect(bar.startsWith('<rect x="47" y="50" width="18" height="4" fill="#39353b"/>')).toBe(true)
+    expect(bar.includes('<rect x="48" y="51" width="16" height="2" fill="#777b80"/>')).toBe(true)
+    expect((bar.match(/<rect /g) ?? []).length).toBe(width ? 3 : 2)
+    if (width) expect(bar.endsWith(`<rect x="48" y="51" width="${width}" height="2" fill="${color}"/>`)).toBe(true)
+    expect(svg.includes(`Limit Claude: 5 giờ ${left === null ? 'chưa rõ' : `${left}%`} · Tuần chưa rõ`)).toBe(true)
+  }
+})
+
+test('bar nằm trên đầu, không đụng bubble, bảng tên hoặc hàng trước trong cả hai khu', () => {
+  const data = state(Array.from({ length: 5 }, (_, i) => row(`waiting-${i}`, 'waiting')))
+  data.codex = { limits: null, runs: Array.from({ length: 6 }, (_, i) => ({
+    id: String(i), folder: 'game', status: 'stopped', lastTool: '', tools: 0,
+    tokens: null, elapsed: '<1m', lastAt: NOW,
+  })) }
+  const scene = buildScene(data, NOW)
+  const svg = renderOfficeSvg(scene)
+  const bars = [...svg.matchAll(/<g data-layer="limit-bar"><rect x="([\d.]+)" y="([\d.]+)" width="18" height="4"/g)]
+  expect(bars.length).toBe(12)
+  for (const match of bars) {
+    const x = Number(match[1]), top = Number(match[2])
+    const work = x < 200
+    const headY = top + 5
+    expect(top + 4).toBeLessThanOrEqual(headY - 1) // Kể cả đầu đang bob lên 1 px.
+    expect(x).toBeGreaterThan(x + 9 - 26 + 13) // Bubble ở bên trái đầu.
+    const firstHead = work ? 55 : 65
+    const stride = work ? 48 : 42
+    if (headY > firstHead) {
+      const previousTagBottom = headY - stride + (work ? 39 : 33) + 4
+      expect(top).toBeGreaterThanOrEqual(previousTagBottom)
+      expect(top).toBeGreaterThan(headY - stride + (work ? 39 : 36)) // Hết bàn/sofa hàng trước.
+    }
+  }
+})
+
+test('scene làm tròn limit, SVG chỉ đổi khi phần trăm nguyên đổi hoặc cửa sổ hết hạn', () => {
+  const data = accountState()
+  const scene = buildScene(data, NOW)
+  remember(data, scene)
+  const svg = renderOfficeSvg(scene)
+  data.limits[0]!.percentUsed = 24.3
+  data.codex!.limits!.secondary!.usedPercent = 14.2
+  data.agents[1]!.tokens++
+  expect(renderOfficeSvg(buildScene(data, NOW + 3000))).toBe(svg)
+  data.limits[0]!.percentUsed = 25.2
+  expect(renderOfficeSvg(buildScene(data, NOW + 3000)) === svg).toBe(false)
+  expect(renderOfficeSvg(buildScene(data, NOW + 60000)).includes('Limit Codex: 5 giờ chưa rõ')).toBe(true)
+})

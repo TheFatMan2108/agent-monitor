@@ -4,7 +4,9 @@ import type {
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
 import type { AgentRow, CodexData, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState, OtherSession } from '../types'
-import { buildScene, renderAvatarSvg, renderOfficeSvg } from './office'
+import { buildScene, remaining, renderAvatarSvg, renderOfficeSvg } from './office'
+
+export { remaining } from './office'
 
 const PANE = 'agent-monitor'
 const MAIN = '@main'
@@ -20,11 +22,6 @@ const MAX_HISTORY = 200
 const STATUS: Record<AgentStatus, string> = {
   pending: '◌ Chờ chạy', running: '● Đang chạy', waiting: '◷ Đang chờ',
   idle: '○ Rảnh', completed: '✓ Hoàn tất', failed: '✗ Thất bại', killed: '■ Đã dừng',
-}
-
-/** Tính phần trăm còn lại, chặn giá trị ngoài khoảng và số không hợp lệ. */
-export function remaining(used: number): number {
-  return Number.isFinite(used) ? Math.round(Math.max(0, Math.min(100, 100 - used)) * 10) / 10 : 0
 }
 
 /** Định dạng thời gian reset từ timestamp ISO, không suy đoán khi thiếu dữ liệu. */
@@ -736,14 +733,24 @@ export const register: Register = (on, options) => {
         : agent.kind === 'subagent' ? 'Agent con Claude' : 'Phiên Claude khác'
       const status = agent.status === 'stopped' ? CODEX_STATUS.stopped : STATUS[agent.status]
       const detail = `${agent.tool} · ${agent.tools} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
+      const { fiveHourLeft, weekLeft, binding, share, account } = agent.limit
+      const limitColor = binding === null ? undefined : binding < 5 ? 'error' : binding < 20 ? 'warning' : undefined
+      const percent = (left: number | null, bar: boolean): string => {
+        if (left === null) return 'chưa rõ'
+        const filled = Math.round(left / 10)
+        return `${bar ? `[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ` : ''}${left}%`
+      }
+      const limitDetail = `5 giờ ${percent(fiveHourLeft, !small)} · Tuần ${percent(weekLeft, !small)}`
       return <Box key={`card:${agent.id}`} flexDirection="row" gap={1} padding={1} borderStyle="round" borderColor="subtle">
         {Svg && <Svg source={renderAvatarSvg(agent.lookSeed, agent.kind)} alt={`Chân dung ${agent.name}`} width={36} height={36} />}
         <Box flexDirection="column" flexGrow={1}>
-          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text> · {agent.name} · {agent.task} · {status} · {detail}</Text>
+          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text> · {agent.name} · {agent.task} · {status} · {detail}<Text color={limitColor}> · {limitDetail}</Text></Text>
             : <>
               <Text bold>{agent.task}</Text>
               <Text color={agent.kind === 'codex' ? 'success' : agent.kind === 'main' ? 'claude' : 'suggestion'}>{type} · {agent.name}{agent.model ? ` · ${agent.model}` : ''} · {status}</Text>
               <Text dimColor>{detail}</Text>
+              <Text color={limitColor}>Limit {account === 'codex' ? 'Codex' : 'Claude'} · {limitDetail}</Text>
+              {share !== null && <Text dimColor>Agent này chiếm {share}% token của tài khoản trong các agent đang theo dõi</Text>}
               {Svg && agent.status === 'running' && <Svg source={activityBar} alt="Đang xử lý, chưa có số liệu tiến độ" height={4} />}
             </>}
         </Box>
@@ -797,6 +804,7 @@ export const register: Register = (on, options) => {
 
         {Svg ? <>
           <Text bold>Đang làm · {working.length}</Text>
+          <Text dimColor>Limit tính theo tài khoản: các agent cùng tài khoản dùng chung một hạn mức.</Text>
           {cards(working, false)}
           <Text bold>Đang nghỉ · {resting.length}</Text>
           {cards(resting, true)}
