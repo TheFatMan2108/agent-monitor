@@ -1,0 +1,5 @@
+{
+  "name": "thefatman2108-mods",
+  "owner": { "name": "TheFatMan2108" },
+  "plugins": [{ "name": "agent-monitor", "source": "./" }]
+}

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="778" viewBox="0 0 860 778" role="img" aria-label="Hình minh họa pane Agent Monitor với dữ liệu mẫu">
+  <style>
+    text { font-family: 'Cascadia Mono', Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace; font-size: 14px; fill: #d7dae0; white-space: pre; }
+    .h { fill: #ffffff; font-weight: 700; }
+    .g { fill: #e5b567; font-weight: 700; }
+    .d { fill: #8b929e; }
+    .w { fill: #f0a35e; }
+    .ok { fill: #7ec699; }
+    .btn { fill: #2a3040; stroke: #4a5266; }
+    .t { font-size: 13px; }
+  </style>
+  <rect width="860" height="778" rx="12" fill="#161a22"/>
+  <rect x="0" y="0" width="860" height="40" rx="12" fill="#222835"/>
+  <rect x="0" y="28" width="860" height="12" fill="#222835"/>
+  <text x="20" y="26" class="h">Theo dõi agent</text>
+  <text x="840" y="26" class="d t" text-anchor="end">/agent-monitor</text>
+
+  <text x="20" y="70" class="h">Limit còn lại</text>
+  <text x="20" y="94" class="g">Claude Code</text>
+  <text x="20" y="116">5 giờ [████████░░] 76% còn lại · còn 3h 45m</text>
+  <text x="20" y="138">Tuần  [██████████] 96% còn lại · còn 158h 12m</text>
+  <text x="20" y="160">Context phiên này: 85% còn lại</text>
+  <text x="20" y="188" class="g">Codex CLI · plus</text>
+  <text x="20" y="210">5 giờ [███████░░░] 69% còn lại · còn 4h 2m</text>
+  <text x="20" y="232" class="w">Tuần  [██░░░░░░░░] 18% còn lại · còn 66h 30m</text>
+  <text x="20" y="254" class="d">Cập nhật lúc 10:23:00 (theo lần gọi Codex gần nhất)</text>
+  <text x="20" y="276" class="d">Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.</text>
+
+  <text x="20" y="312" class="h">Các agent</text>
+  <text x="20" y="336"><tspan class="ok">● Đang chạy</tspan> · Claude Code</text>
+  <text x="20" y="358" class="d">Sửa src/cart.ts · 42 lần gọi · 0h 18m · 148.2k token</text>
+  <text x="20" y="386">  <tspan class="ok">● Đang chạy</tspan> · Explore · Tìm nơi xử lý thanh toán</text>
+  <rect x="780" y="370" width="56" height="24" rx="5" class="btn"/>
+  <text x="808" y="387" text-anchor="middle" class="t">Xem</text>
+  <text x="20" y="408" class="d">  Tìm nội dung · 9 lần gọi · 0h 3m · 21.4k token</text>
+  <text x="20" y="436" class="g">Codex CLI</text>
+  <text x="20" y="458"><tspan class="ok">● Đang chạy</tspan> · demo-app · shell_command · 38 lần gọi · 0h 6m · 119.6k token</text>
+  <text x="20" y="480">✓ Hoàn tất · demo-app · apply_patch · 14 lần gọi · 0h 4m · 62.1k token</text>
+
+  <text x="20" y="516" class="h">Tương tác</text>
+  <text x="20" y="540">10:23:00 Codex CLI → Claude Code: xong sau 0h 6m</text>
+  <text x="20" y="562">10:17:15 Claude Code → Codex CLI: Thêm kiểm tra giỏ hàng trống và viết test</text>
+  <text x="20" y="584">10:16:02 Claude Code → Explore: giao việc Tìm nơi xử lý thanh toán</text>
+  <text x="20" y="606">10:12:40 Explore → Claude Code: Đã tìm thấy logic ở src/cart.ts</text>
+
+  <text x="20" y="642" class="h">Phiên khác trên máy</text>
+  <text x="20" y="666">Viết tài liệu · demo-docs · <tspan class="ok">● Đang chạy</tspan> · chờ: — · 0h 2m</text>
+  <text x="20" y="688">Sửa lỗi đăng nhập · demo-api · ○ Rảnh · chờ: người dùng · 0h 25m</text>
+
+  <line x1="20" y1="716" x2="840" y2="716" stroke="#2a3040"/>
+  <text x="20" y="744" class="d t">Hình minh họa với dữ liệu mẫu, không phải ảnh chụp màn hình.</text>
+</svg>
