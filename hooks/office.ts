@@ -16,16 +16,6 @@ function zone(status: OfficeStatus): OfficeZone {
   return status === 'running' || status === 'pending' || status === 'waiting' || status === 'failed' ? 'work' : 'lounge'
 }
 
-function sessionStatus(status: string): OfficeStatus {
-  if (/waiting|Đang chờ|Cần phản hồi/i.test(status)) return 'waiting'
-  if (/failed|Thất bại/i.test(status)) return 'failed'
-  if (/running|active|busy|thinking|working|Đang chạy|suy nghĩ|làm việc/i.test(status)) return 'running'
-  if (/completed|Hoàn tất/i.test(status)) return 'completed'
-  if (/stopped|killed|closed|ended|dừng|đóng|kết thúc/i.test(status)) return 'stopped'
-  if (/pending|Chờ chạy/i.test(status)) return 'pending'
-  return 'idle'
-}
-
 function priority(agent: OfficeAgent): number {
   return agent.kind === 'main' ? 0 : agent.status === 'running' ? 1
     : agent.status === 'waiting' ? 2 : agent.status === 'failed' ? 3 : 4
@@ -84,13 +74,6 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
     tools: run.tools, partial: run.partial, elapsed: run.elapsed, tokens: run.tokens,
     tick: run.status === 'completed' && now >= run.lastAt && now - run.lastAt < 60000,
   }, now)
-  for (const session of state.sessions ?? []) {
-    const status = sessionStatus(session.status)
-    add({ id: `session:${session.id}`, name: session.name, task: session.folder, kind: 'session', status,
-      lookSeed: `session:${session.id}`, tool: session.status, tools: 0, elapsed: session.age, tokens: null,
-      tick: status === 'completed' && now >= session.statusUpdatedAt && now - session.statusUpdatedAt < 60000,
-    }, now)
-  }
   // Bao gồm mọi agent có card trong scene, cả những người đang chờ ghế.
   const tokens = { claude: 0, codex: 0 }
   for (const agent of agents) tokens[agent.limit.account] += agent.tokens ?? 0
@@ -203,7 +186,7 @@ function character(seed: string, kind: OfficeKind, parentSeed?: string, headOnly
   const ownShirt = SHIRTS[(value >>> 13) % SHIRTS.length]
   const shirt = kind === 'main' ? '#b96d50' : kind === 'codex' ? '#343943'
     : kind === 'subagent' ? tint(ownShirt, SHIRTS[hash(parentSeed ?? seed) % SHIRTS.length]) : tint(ownShirt, '#93958e')
-  const skin = kind === 'session' ? tint(SKIN[(value >>> 5) % SKIN.length], '#aaa59b') : SKIN[(value >>> 5) % SKIN.length]
+  const skin = SKIN[(value >>> 5) % SKIN.length]
   const palette = { o: OUTLINE, h: HAIR[value % HAIR.length], H: '#d9b78a', O: OUTLINE, c: shirt, C: '#eee1b7' }
   let art = '<g data-layer="character">'
   if (kind === 'codex') art += rect(0, 4, 16, 12, '#232b34') + rect(1, 3, 14, 12, '#525963')
@@ -328,7 +311,7 @@ function occupant(agent: OfficeAgent): string {
   const percent = (value: number | null): string => value === null ? 'chưa rõ' : `${value}%`
   const limit = `Limit ${agent.limit.account === 'codex' ? 'Codex' : 'Claude'}: 5 giờ ${percent(agent.limit.fiveHourLeft)} · Tuần ${percent(agent.limit.weekLeft)}`
   const calls = agent.kind === 'codex' && agent.partial ? ` · ${agent.tools}+ lần gọi` : ''
-  let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]}${calls} · ${limit}</title><g${agent.kind === 'session' ? ' opacity=".72"' : ''}>`
+  let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]}${calls} · ${limit}</title><g>`
   if (resting) art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="3s" repeatCount="indefinite"/>'
   if (agent.status === 'failed') art += '<animateTransform attributeName="transform" type="translate" values="0 1;0 2;0 1" dur="3s" repeatCount="indefinite"/>'
   art += `<g transform="scale(1.5)">${character(agent.lookSeed, agent.kind, agent.parentSeed, false, true, agent.status === 'failed')}</g>`

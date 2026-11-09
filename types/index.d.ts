@@ -22,15 +22,6 @@ export type FeedItem = {
   text: string
 }
 export type LimitRow = { kind: string; percentUsed: number; resetsAt?: string; reset: string }
-export type OtherSession = {
-  id: string
-  name: string
-  folder: string
-  status: string
-  waitingFor: string
-  statusUpdatedAt: number
-  age: string
-}
 export type CodexWindow = { usedPercent: number; windowMinutes: number; resetsAt?: number; expired?: boolean }
 export type CodexLimits = {
   updatedAt: number
@@ -41,6 +32,7 @@ export type CodexLimits = {
 }
 export type CodexSummary = {
   partial?: boolean
+  cwd?: string
   folder: string
   firstAt: number | null
   lastAt: number | null
@@ -62,21 +54,23 @@ export type CodexRun = {
   elapsed: string
   lastAt: number
 }
+export type CodexLaunch = { id: string; at: number; cwd?: string }
 export type CodexData = { limits: CodexLimits | null; runs: CodexRun[] }
 export type MonitorState = {
   agents: AgentRow[]
   limits: LimitRow[]
   contextRemaining: number | null
   feed: FeedItem[]
-  sessions: OtherSession[] | null
   codex: CodexData | null
+  codexLaunches?: CodexLaunch[]
+  codexClaims?: Record<string, string>
   claudeCost?: number | null
   officeSeats?: Record<string, OfficeSeat>
   officePhase?: string
 }
 
 export type OfficeZone = 'work' | 'lounge'
-export type OfficeKind = 'main' | 'subagent' | 'codex' | 'session'
+export type OfficeKind = 'main' | 'subagent' | 'codex'
 export type OfficeStatus = AgentRow['status'] | 'stopped'
 export type OfficeSeat = { zone: OfficeZone; seat: number; firstSeen: number }
 export type OfficeAgent = OfficeSeat & {

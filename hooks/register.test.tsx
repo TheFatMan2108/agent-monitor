@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
-import type { MonitorState } from '../types'
-import { otherSessions, remaining, resetText, taskPids, register, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
+import type { CodexLaunch, MonitorState } from '../types'
+import { remaining, resetText, register, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
 import { buildScene, renderOfficeSvg } from './office'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
@@ -18,7 +18,7 @@ const PANE = {
 function setup(on: On, options: {
   limits?: SessionRateLimit[]; env?: Record<string, string>; agents?: AgentInfo[]
   onUsage?: () => void; onAgents?: () => void; onWrite?: () => void
-  usageDelay?: number; agentDelay?: number
+  usageDelay?: number; agentDelay?: number; launches?: CodexLaunch[]
 } = {}) {
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, options.env ?? {})
@@ -41,7 +41,10 @@ function setup(on: On, options: {
   let seeded: MonitorState | undefined
   on('state.get', async (_, e, next) => {
     const result = await next(e)
-    return seeded ? { ...result, value: { ...result.value, value: { shape: 'monitor-5', value: seeded } } } : result
+    if (seeded) return { ...result, value: { ...result.value, value: { shape: 'monitor-6', value: seeded } } }
+    if (options.launches && !held) return { ...result, value: { ...result.value, value: { shape: 'monitor-6', value: {
+      agents: [], limits: [], contextRemaining: null, feed: [], codex: null, codexLaunches: options.launches } } } }
+    return result
   })
   on('state.set', async (_, e, next) => {
     const result = await next(e)
@@ -78,8 +81,6 @@ test('phần trăm còn lại và thời gian reset được tính chính xác',
   expect(resetText('2026-11-09T03:00:01Z', NOW)).toBe('còn 0h 1m')
   expect(resetText(undefined, NOW)).toBe('Chưa rõ giờ reset')
   expect(resetText('không hợp lệ', NOW)).toBe('Chưa rõ giờ reset')
-  expect(taskPids('"claude.exe","1234","Console","1","10 K"\r\n"a,b.exe","56","Console"')).toEqual([1234, 56])
-  expect(taskPids('không có dữ liệu')).toBe(null)
 })
 
 test('hiển thị thông báo limit trống trên mọi surface', async ($, on) => {
@@ -290,63 +291,6 @@ test('token và công cụ được gán theo agentId; công cụ lỗi được
   await ui.unmount()
 })
 
-test('không đọc key, link và phiên hiện tại; không lưu trường bí mật', async ($, on) => {
-  const { clock, snapshot } = setup(on, { env: { CLAUDE_CONFIG_DIR: 'C:/config', OS: 'Windows_NT' } })
-  const reads: string[] = []
-  let taskCalls = 0
-  on('process.run', (_, e) => {
-    expect(e.argv).toEqual(['tasklist', '/FO', 'CSV', '/NH'])
-    taskCalls++
-    return { value: { exitCode: 0, stdout: '"claude.exe","42","Console"', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
-  on('fs.list', (_, e) => {
-    expect(e.path?.replace(/\\/g, '/')).toBe('C:/config/sessions')
-    return { value: ['secret.key', 'own.json', 'other.json', 'dead.json', 'alias.json', 'notes.txt'].map(name => ({
-      name, kind: 'file' as const, size: 20, mtimeMs: NOW, isLink: name === 'alias.json',
-    })) }
-  })
-  on('fs.read', (_, e) => {
-    reads.push(e.path.replace(/\\/g, '/'))
-    expect(e.path.endsWith('.key')).toBe(false)
-    return { value: JSON.stringify({
-      sessionId: e.path.endsWith('dead.json') ? 'dead' : 'other',
-      name: 'Phiên kiểm tra', cwd: 'C:\\work\\game', status: 'waiting', waitingFor: 'permission',
-      pid: e.path.endsWith('dead.json') ? 99 : 42, statusUpdatedAt: NOW - 120000,
-      peerToken: 'SECRET_MUST_NEVER_ENTER_STATE',
-    }) }
-  })
-  await start($)
-  await clock.settle()
-  expect(reads).toEqual(['C:/config/sessions/other.json', 'C:/config/sessions/dead.json'])
-  const held = snapshot()
-  expect(held.sessions?.map(session => session.id)).toEqual(['other'])
-  expect(held.sessions?.[0]?.folder).toBe('game')
-  expect(JSON.stringify(held).includes('SECRET_MUST_NEVER_ENTER_STATE')).toBe(false)
-  expect(JSON.stringify(held).includes('.key')).toBe(false)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /Phiên kiểm tra/ }))?.text)
-    .toBe('Phiên kiểm tra · game · ◷ Đang chờ · chờ: cấp quyền · 0h 2m')
-  await ui.unmount()
-  await clock.advance(12000)
-  expect(taskCalls).toBe(1)
-  await clock.advance(3000)
-  expect(taskCalls).toBe(2)
-})
-
-test('filesystem hoặc process thất bại sẽ ẩn phần phiên khác và không ảnh hưởng session', async ($, on) => {
-  const { clock, snapshot } = setup(on, { env: { CLAUDE_CONFIG_DIR: 'C:/config', OS: 'Windows_NT' } })
-  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'Không chạy được', isStdoutTruncated: false, isStderrTruncated: false } }))
-  let reads = 0
-  on('fs.list', () => { reads++; return { value: [] } })
-  await start($)
-  await clock.settle()
-  expect(snapshot().sessions).toBe(null)
-  expect(reads).toBe(0)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: 'Phiên khác trên máy' })).toBe(undefined)
-  await ui.unmount()
-})
-
 test('poll phát hiện hoàn tất và lồng agent theo parent; nút xem xử lý deny', async ($, on) => {
   const agents: AgentInfo[] = [
     { id: 'a1', name: 'scout', type: 'Explore', description: 'Khảo sát', status: 'running' },
@@ -424,17 +368,6 @@ test('agent poll cũ không dọn công cụ vừa bắt đầu', async ($, on) 
   await call
   expect(snapshot().agents.find(row => row.id === 'a1')?.active.length).toBe(0)
 })
-
-test('lỗi đọc hoặc liệt kê filesystem trả về null', async () => {
-  const unavailable = { fs: { list: async () => { throw new Error('Không đọc được') } } } as unknown as CoreEngineInterface
-  expect(await otherSessions(unavailable, '/sessions', 'own', NOW, null)).toBe(null)
-  const unreadable = { fs: {
-    list: async () => [{ name: 'other.json', kind: 'file', size: 1, mtimeMs: NOW, isLink: false }],
-    read: async () => { throw new Error('Không đọc được') },
-  } } as unknown as CoreEngineInterface
-  expect(await otherSessions(unreadable, '/sessions', 'own', NOW, null)).toBe(null)
-})
-
 
 function codexLine(type: string, payload: unknown, at = NOW): string {
   return JSON.stringify({ timestamp: new Date(at).toISOString(), type, payload })
@@ -616,7 +549,7 @@ test('Codex chỉ list sessions và đọc rollout, cache theo size/mtime, khôn
   ]).flat())
 })
 
-test('Codex giới hạn 4 ngày, 8 rollout mới nhất và 3 phiên đã kết thúc trong 24 giờ', async () => {
+test('Codex giới hạn 4 ngày và 8 rollout mới nhất', async () => {
   const files: RolloutFile[] = []
   for (let index = 0; index < 12; index++) {
     files.push({
@@ -639,14 +572,9 @@ test('Codex giới hạn 4 ngày, 8 rollout mới nhất và 3 phiên đã kết
   expect(fixture.lists.filter(path => /\/\d{4}\/\d{2}\/\d{2}$/.test(path)).length).toBe(4)
   expect(fixture.lists.some(path => /\/(?:05|04)$/.test(path))).toBe(false)
   expect(result?.runs.filter(run => run.status === 'running').length).toBe(2)
-  expect(result?.runs.filter(run => run.status === 'completed').length).toBe(3)
+  expect(result?.runs.filter(run => run.status === 'completed').length).toBe(6)
   // token_count mới nhất thắng, không dùng mtime để chọn limit.
   expect(result?.limits?.primary?.usedPercent).toBe(7)
-  const old = codexFixture('/codex-old-test', [{
-    name: 'rollout-old.jsonl', mtime: NOW - 86400001,
-    text: codexLine('event_msg', { type: 'task_complete' }, NOW - 86400001),
-  }])
-  expect((await readCodex(old.api, '/codex-old-test', NOW))?.runs).toEqual([])
 })
 
 test('lỗi listing ẩn Codex; lỗi đọc, parse hoặc link từng file không che phiên và limit khác', async () => {
@@ -748,7 +676,8 @@ test('rollout lớn dùng process sau stat, parse head/tail, cache size/mtime v�
   expect(fixture.processes).toEqual([{ argv: buildCodexReadArgv(path, true)[0], timeoutMs: 5000 }])
   expect(fixture.reads).toEqual([`${home}/sessions/2026/11/09/rollout-small.jsonl`])
   expect(result?.runs[0]).toEqual({ id: path, folder: 'Trò chơi', status: 'completed',
-    lastTool: 'exec_command', tools: 1, partial: true, tokens: 12345, elapsed: '0h 3m', lastAt: NOW })
+    lastTool: 'exec_command', tools: 1, partial: true, tokens: 12345, elapsed: '0h 3m', lastAt: NOW,
+    startedAt: NOW - 180000, cwd: 'c:/work/trò chơi' })
   expect(result?.limits?.primary?.usedPercent).toBe(33)
   expect(JSON.stringify(result).includes(secret)).toBe(false)
   expect(JSON.stringify(result).includes('arguments')).toBe(false)
@@ -825,7 +754,7 @@ test('rollout lớn không chạy process khi checkedStat phát hiện link ho�
 
 test('card, title nhân vật và terminal hiển thị số lần gọi partial, không lưu nội dung tail vào atom', async ($, on) => {
   const home = 'C:/codex-partial-ui-test'
-  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home } })
+  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home }, launches: [{ id: 'l', at: NOW - 120000 }] })
   const fixture = codexFixture(home, [{
     name: 'rollout-large.jsonl', mtime: NOW, size: 9942134,
     text: [codexLine('session_meta', { cwd: '/work/game' }, NOW - 120000),
@@ -854,7 +783,7 @@ test('card, title nhân vật và terminal hiển thị số lần gọi partial
 test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và reset không hiển thị phần trăm cũ', async ($, on) => {
   let writes = 0
   const home = 'C:/codex-ui-test'
-  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home }, onWrite: () => { writes++ } })
+  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home }, onWrite: () => { writes++ }, launches: [{ id: 'l', at: NOW - 120000 }] })
   const limits = { ...codexLimits(), rate_limit_reached_type: 'primary' }
   limits.primary.resets_at = NOW / 1000 + 20
   const file = {
@@ -906,7 +835,7 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
 })
 
 test('fallback chỉ đọc USERPROFILE/.codex/sessions', async ($, on) => {
-  const { clock, snapshot } = setup(on, { env: { USERPROFILE: 'C:/profile', OS: 'Windows_NT' } })
+  const { clock, snapshot } = setup(on, { env: { USERPROFILE: 'C:/profile', OS: 'Windows_NT' }, launches: [{ id: 'l', at: NOW }] })
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   const fixture = codexFixture('C:/profile/.codex', [{
     name: 'rollout-fallback.jsonl', mtime: NOW,
@@ -1028,8 +957,6 @@ test('card desktop hiển thị limit đúng tài khoản, share token riêng v�
   const data = structuredClone(snapshot())
   data.agents.find(agent => agent.id === '@main')!.tokens = 66
   data.agents.find(agent => agent.id === 'child')!.tokens = 34
-  data.sessions = [{ id: 'other', name: 'Phiên khác', folder: 'game', status: 'running',
-    waitingFor: '', statusUpdatedAt: NOW, age: '<1m' }]
   data.codex = { limits: { updatedAt: NOW, plan: '', reached: false,
     primary: { windowMinutes: 10080, usedPercent: 94 },
     secondary: { windowMinutes: 300, usedPercent: 60 } },
@@ -1038,13 +965,12 @@ test('card desktop hiển thị limit đúng tài khoản, share token riêng v�
   seed(data)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const claudeLine = 'Limit Claude · 5 giờ [████████░░] 76% · Tuần [██████████] 96%'
-  for (const id of ['@main', 'child', 'session:other']) {
+  for (const id of ['@main', 'child']) {
     const card = await ui.find({ key: `card:${id}` })
     expect(card?.text.includes(claudeLine)).toBe(true)
     expect(card?.text.includes('Limit Codex')).toBe(false)
   }
   expect((await ui.find({ key: 'card:child' }))?.text.includes('Agent này chiếm 34% token của tài khoản trong các agent đang theo dõi')).toBe(true)
-  expect((await ui.find({ key: 'card:session:other' }))?.text.includes('Agent này chiếm')).toBe(false)
   const line = await ui.find({ type: 'Text', text: /^Limit Codex ·/ })
   expect(line?.text).toBe('Limit Codex · 5 giờ [████░░░░░░] 40% · Tuần [█░░░░░░░░░] 6%')
   expect(line?.props.color).toBe('warning')
@@ -1113,8 +1039,134 @@ test('terminal giữ nguyên toàn bộ các dòng chữ, không thêm limit/sha
     'Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.',
     'Các agent', '○ Rảnh · Claude Code · ',
     'Không có công cụ đang chạy · 0 lần gọi · <1m · 0 token',
-    'Codex CLI', 'Chưa có hoạt động Codex', 'Tương tác', 'Chưa có tương tác.',
+    'Codex CLI', 'Chưa có lần gọi Codex trong phiên này', 'Tương tác', 'Chưa có tương tác.',
   ])
   expect((await ui.findAll({ type: 'Svg' })).length).toBe(0)
+  await ui.unmount()
+})
+
+
+test('nhận diện đúng lệnh thật chạy codex exec và thư mục làm việc', () => {
+  expect(parseCodexCommand("codex exec -i 'C:\\a\\1.png' --sandbox workspace-write -C 'F:\\AI_Agent\\agent-monitor' - < \"$S/task.md\" > \"$S/task.log\" 2>&1; echo \"codex exit: $?\""))
+    .toEqual({ cwd: 'f:/ai_agent/agent-monitor' })
+  expect(parseCodexCommand("S='/c/x;y'; codex exec --sandbox workspace-write -C \"F:\\Work\\Game\" -")).toEqual({ cwd: 'f:/work/game' })
+  expect(parseCodexCommand('codex exec --cd=/work/game hi')).toEqual({ cwd: '/work/game' })
+  expect(parseCodexCommand('npx -y codex e hi')).toEqual({})
+  expect(parseCodexCommand('& "C:\\tools\\codex.cmd" exec hi')).toEqual({})
+  expect(parseCodexCommand('cd /f/Work/Game && codex exec hi')).toEqual({ cwd: 'f:/work/game' })
+  expect(parseCodexCommand('codex exec -C "$R" -')).toEqual({})
+  expect(parseCodexCommand('FOO=1 codex -m gpt exec hi')).toEqual({})
+  for (const text of ['grep codex exec', 'echo "codex exec"', 'cat codex-task.md', 'Get-Process codex',
+    'ls C:/tools/codex/exec', 'codex login', 'codex --version', 'rg "codex exec" -n', 'mycodex exec']) {
+    expect(parseCodexCommand(text)).toBe(null)
+  }
+  expect(normalizePath('F:\\AI_Agent\\Game\\')).toBe('f:/ai_agent/game')
+  expect(normalizePath('/f/AI_Agent/Game')).toBe('f:/ai_agent/game')
+})
+
+function scanned(id: string, startedAt: number | undefined, cwd?: string) {
+  return { id, folder: 'x', status: 'running' as const, lastTool: '', tools: 0, tokens: null, elapsed: '<1m', lastAt: NOW, startedAt, cwd }
+}
+
+test('ghép lần gọi với rollout theo thời gian và thư mục, không ghép trùng', () => {
+  const launch = { id: 'l1', at: NOW, cwd: 'f:/game' }
+  expect(claimCodexRuns([scanned('in', NOW + 90000, 'f:/game')], [launch], {})).toEqual({ l1: 'in' })
+  expect(claimCodexRuns([scanned('early', NOW - 5000, 'f:/game')], [launch], {})).toEqual({ l1: 'early' })
+  expect(claimCodexRuns([scanned('late', NOW + 90001, 'f:/game')], [launch], {})).toEqual({})
+  expect(claimCodexRuns([scanned('before', NOW - 5001, 'f:/game')], [launch], {})).toEqual({})
+  expect(claimCodexRuns([scanned('other', NOW + 1000, 'f:/other')], [launch], {})).toEqual({})
+  expect(claimCodexRuns([scanned('nocwd', NOW + 1000)], [launch], {})).toEqual({ l1: 'nocwd' })
+  expect(claimCodexRuns([scanned('free', NOW + 1000, 'f:/any')], [{ id: 'l1', at: NOW }], {})).toEqual({ l1: 'free' })
+  expect(claimCodexRuns([scanned('none', undefined, 'f:/game')], [launch], {})).toEqual({})
+  expect(claimCodexRuns([scanned('far', NOW + 40000, 'f:/game'), scanned('near', NOW + 2000, 'f:/game')], [launch], {})).toEqual({ l1: 'near' })
+  expect(claimCodexRuns([scanned('only', NOW + 1000, 'f:/game')],
+    [launch, { id: 'l2', at: NOW + 500, cwd: 'f:/game' }], {})).toEqual({ l1: 'only' })
+  expect(claimCodexRuns([scanned('a', NOW + 1000, 'f:/game'), scanned('b', NOW + 1500, 'f:/game')],
+    [launch, { id: 'l2', at: NOW + 500, cwd: 'f:/game' }], {})).toEqual({ l1: 'a', l2: 'b' })
+  expect(claimCodexRuns([scanned('new', NOW + 1000, 'f:/game')], [launch], { l1: 'kept' })).toEqual({ l1: 'kept' })
+  expect(claimCodexRuns([], [launch], { gone: 'x', l1: 'kept' })).toEqual({ l1: 'kept' })
+})
+
+function rolloutOf(name: string, cwd: string, at: number, tokens: number, mtime = NOW) {
+  return { name, mtime, text: [
+    codexLine('session_meta', { cwd, instructions: 'PRIVATE_TEXT' }, at),
+    codexLine('event_msg', { type: 'task_started' }, at + 1000),
+    codexLine('response_item', { type: 'function_call', name: 'exec', arguments: 'PRIVATE_TEXT' }, at + 2000),
+    codexLine('event_msg', { type: 'token_count', rate_limits: codexLimits(14, at + 3000), info: { total_token_usage: { total_tokens: tokens } } }, at + 3000),
+  ].join('\n') }
+}
+
+test('chỉ hiện Codex do phiên này gọi; phiên khác và limit tài khoản xử lý đúng', async ($, on) => {
+  const home = 'C:/codex-scope-test'
+  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home } })
+  const fixture = codexFixture(home, [
+    rolloutOf('rollout-mine.jsonl', 'F:\\Work\\Game', NOW + 1000, 700),
+    rolloutOf('rollout-other.jsonl', 'F:\\Work\\Other', NOW + 1200, 9000),
+    rolloutOf('rollout-old.jsonl', 'F:\\Work\\Game', NOW - 600000, 5000),
+  ])
+  mockCodexFiles(on, fixture)
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  await start($)
+  await clock.settle()
+  expect(snapshot().codex?.runs).toEqual([])
+  expect(snapshot().codex?.limits?.plan).toBe('plus')
+  const empty = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await empty.find({ type: 'Text', text: 'Chưa có lần gọi Codex trong phiên này' }))?.text).toBe('Chưa có lần gọi Codex trong phiên này')
+  expect((await empty.find({ type: 'Text', text: 'Codex CLI · plus' }))?.text).toBe('Codex CLI · plus')
+  expect(await empty.find({ key: 'card:codex:C:/codex-scope-test/sessions/2026/11/09/rollout-mine.jsonl' })).toBe(undefined)
+  await empty.unmount()
+  await $.tool.call({ tool: 'Bash', command: "codex exec -C 'F:\\Work\\Game' hi", agentId: 'child', tool_use_id: 'launch-1' })
+  await clock.advance(15000)
+  const held = snapshot()
+  expect(held.codexLaunches).toEqual([{ id: 'launch-1', at: NOW, cwd: 'f:/work/game' }])
+  expect(held.codex?.runs.map(run => run.id)).toEqual(['C:/codex-scope-test/sessions/2026/11/09/rollout-mine.jsonl'])
+  expect(held.codex?.runs[0]?.folder).toBe('Game')
+  expect(JSON.stringify(held).includes('f:/work/other')).toBe(false)
+  expect(JSON.stringify(held.codex).includes('f:/work/game')).toBe(false)
+  expect(JSON.stringify(held).includes('PRIVATE_TEXT')).toBe(false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const tile = await ui.findAll({ type: 'Text' })
+  expect(tile[tile.findIndex(text => text.text === 'Token') + 1]?.text).toBe('700')
+  expect(await ui.find({ type: 'Text', text: 'Chưa có lần gọi Codex trong phiên này' })).toBe(undefined)
+  await ui.unmount()
+})
+
+test('lần gọi MCP được ghi với thư mục; lệnh không phải Codex thì không', async ($, on) => {
+  const { snapshot } = setup(on)
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  await start($)
+  await $.tool.call({ tool: 'mcp__codex-cli__ask-codex', prompt: 'a', cd: 'F:\\Game', tool_use_id: 'a' })
+  await $.tool.call({ tool: 'mcp__codex-cli__batch-codex', prompt: 'b', workingDir: '/f/Game2', tool_use_id: 'b' })
+  await $.tool.call({ tool: 'mcp__codex-cli__brainstorm', prompt: 'c', tool_use_id: 'c' })
+  await $.tool.call({ tool: 'Bash', command: 'grep codex exec', tool_use_id: 'd' })
+  expect(snapshot().codexLaunches?.map(({ id, cwd }) => [id, cwd])).toEqual([['a', 'f:/game'], ['b', 'f:/game2'], ['c', undefined]])
+})
+
+test('rollout đã ghép vẫn được đọc khi rơi khỏi 8 file mới nhất và không tạo dữ liệu phiên khác', async () => {
+  const home = '/codex-keep-test'
+  const files: RolloutFile[] = [rolloutOf('rollout-kept.jsonl', '/work/game', NOW - 900000, 1, NOW - 900000)]
+  for (let i = 0; i < 10; i++) files.push(rolloutOf('rollout-n' + i + '.jsonl', '/work/x', NOW - i * 1000, 1, NOW - i * 1000))
+  const fixture = codexFixture(home, files)
+  const kept = home + '/sessions/2026/11/09/rollout-kept.jsonl'
+  const without = await readCodex(fixture.api, home, NOW)
+  expect(without?.runs.some(run => run.id === kept)).toBe(false)
+  const withKeep = await readCodex(fixture.api, home, NOW, new Set([kept]))
+  expect(withKeep?.runs.some(run => run.id === kept)).toBe(true)
+  expect(fixture.reads.filter(path => path === kept).length).toBe(1)
+})
+
+test('không còn đọc phiên Claude khác hay gọi tasklist', async ($, on) => {
+  const { clock } = setup(on, { env: { CLAUDE_CONFIG_DIR: 'C:/config', OS: 'Windows_NT', USERPROFILE: 'C:/p' } })
+  const lists: string[] = []
+  const processes: string[][] = []
+  on('fs.list', (_, e) => { lists.push(String(e.path)); throw new Error('không có') })
+  on('fs.stat', () => { throw new Error('không có') })
+  on('process.run', (_, e) => { processes.push(e.argv); return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
+  await start($)
+  await clock.settle()
+  expect(lists.some(path => path.includes('config'))).toBe(false)
+  expect(processes).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: 'Phiên khác trên máy' })).toBe(undefined)
   await ui.unmount()
 })

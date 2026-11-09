@@ -11,7 +11,7 @@ function row(id: string, status: AgentRow['status'] = 'running', startedAt = NOW
 }
 
 function state(agents: AgentRow[] = []): MonitorState {
-  return { agents, limits: [], contextRemaining: null, feed: [], sessions: null, codex: null }
+  return { agents, limits: [], contextRemaining: null, feed: [], codex: null }
 }
 
 function remember(data: MonitorState, scene: OfficeScene): void {
@@ -36,7 +36,7 @@ test('ngoại hình cố định theo id, khác nhau theo id và không phụ th
 
 test('mọi nhân vật và avatar có hai mắt tối với pixel highlight, kể cả khi lỗi hoặc đang ngồi', () => {
   const template = buildScene(state(), NOW).agents[0]!
-  for (const kind of ['main', 'codex', 'subagent', 'session'] as const) {
+  for (const kind of ['main', 'codex', 'subagent'] as const) {
     for (let seed = 0; seed < 32; seed++) {
       const lookSeed = `face-${seed}`
       const avatar = renderAvatarSvg(lookSeed, kind)
@@ -57,7 +57,7 @@ test('mọi nhân vật và avatar có hai mắt tối với pixel highlight, k�
 })
 
 test('avatar giữ mọi rect trong 0..24 sau transform, đầu có lề ở cả bốn phía', () => {
-  for (const kind of ['main', 'codex', 'subagent', 'session'] as OfficeKind[]) {
+  for (const kind of ['main', 'codex', 'subagent'] as OfficeKind[]) {
     for (let seed = 0; seed < 64; seed++) {
       const svg = renderAvatarSvg(`bounds-${seed}`, kind)
       const transforms = [{ x: 0, y: 0, scale: 1 }]
@@ -129,7 +129,7 @@ test('mọi trạng thái Claude được ánh xạ đúng khu, main luôn bàn 
   expect(fallback.seat).toBe(0)
 })
 
-test('mọi trạng thái Codex và phiên Claude khác được ánh xạ đúng khu và loại', () => {
+test('mọi trạng thái Codex được ánh xạ đúng khu và loại', () => {
   for (const status of ['running', 'stopped', 'completed'] as const) {
     const data = state()
     data.codex = { limits: null, runs: [{ id: 'run', folder: 'game', status, lastTool: '', tools: 2,
@@ -137,20 +137,6 @@ test('mọi trạng thái Codex và phiên Claude khác được ánh xạ đún
     const agent = buildScene(data, NOW).agents.find(agent => agent.kind === 'codex')!
     expect(agent.zone).toBe(status === 'running' ? 'work' : 'lounge')
     expect(agent.status).toBe(status)
-  }
-  for (const [input, output, area] of [
-    ['busy', 'running', 'work'], ['working', 'running', 'work'], ['thinking', 'running', 'work'],
-    ['● Đang chạy', 'running', 'work'], ['Đang suy nghĩ', 'running', 'work'],
-    ['◷ Đang chờ', 'waiting', 'work'], ['✗ Thất bại', 'failed', 'work'], ['◌ Chờ chạy', 'pending', 'work'],
-    ['○ Rảnh', 'idle', 'lounge'], ['✓ Hoàn tất', 'completed', 'lounge'], ['Đã dừng', 'stopped', 'lounge'],
-    ['Đã đóng', 'stopped', 'lounge'], ['Chưa rõ', 'idle', 'lounge'],
-  ]) {
-    const data = state()
-    data.sessions = [{ id: 'other', name: 'Phiên khác', folder: 'game', status: input,
-      waitingFor: '—', statusUpdatedAt: NOW, age: '<1m' }]
-    const agent = buildScene(data, NOW).agents.find(agent => agent.kind === 'session')!
-    expect(agent.status).toBe(output)
-    expect(agent.zone).toBe(area)
   }
 })
 
@@ -293,8 +279,6 @@ function accountState(): MonitorState {
     { kind: 'seven_day', percentUsed: 4.1, reset: '' },
     { kind: 'seven_day_sonnet', percentUsed: 99, reset: '' },
   ]
-  data.sessions = [{ id: 'other', name: 'Phiên khác', folder: 'game', status: 'running',
-    waitingFor: '', statusUpdatedAt: NOW, age: '<1m' }]
   data.codex = {
     limits: { updatedAt: NOW, plan: '', reached: false,
       primary: { windowMinutes: 10080, usedPercent: 61.2, resetsAt: NOW / 1000 + 3600 },
@@ -307,7 +291,7 @@ function accountState(): MonitorState {
 
 test('limit theo tài khoản, không chia quota theo agent; token share chỉ tính trong tài khoản của scene', () => {
   const scene = buildScene(accountState(), NOW)
-  for (const [id, share] of [['@main', 66], ['child', 34], ['idle', 0], ['session:other', null]] as const) {
+  for (const [id, share] of [['@main', 66], ['child', 34], ['idle', 0]] as const) {
     expect(scene.agents.find(agent => agent.id === id)?.limit)
       .toEqual({ account: 'claude', fiveHourLeft: 76, weekLeft: 96, binding: 76, share })
   }

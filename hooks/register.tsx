@@ -3,7 +3,7 @@ import type {
   AgentInfo, AgentStatus, CoreEngineInterface, Register, SessionContextUsage,
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
-import type { AgentRow, CodexData, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState, OtherSession } from '../types'
+import type { AgentRow, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
 import { buildScene, remaining, renderAvatarSvg, renderOfficeSvg } from './office'
 
 export { remaining } from './office'
@@ -11,12 +11,13 @@ export { remaining } from './office'
 const PANE = 'agent-monitor'
 const MAIN = '@main'
 const CODEX = '@codex'
-const SHAPE = 'monitor-5'
+const SHAPE = 'monitor-6'
 const REF = { plugin: 'agent-monitor', key: 'monitor' } as const
 const INITIAL: MonitorState = {
-  agents: [], limits: [], contextRemaining: null, feed: [], sessions: null, codex: null,
+  agents: [], limits: [], contextRemaining: null, feed: [], codex: null,
 }
 const monitor = atom(REF, INITIAL, { shape: SHAPE })
+const NO_CODEX_RUNS = 'Chưa có lần gọi Codex trong phiên này'
 const EMPTY_LIMITS = 'Chưa có dữ liệu limit (cần gói subscription và ít nhất một lượt gọi API)'
 const MAX_HISTORY = 200
 const STATUS: Record<AgentStatus, string> = {
@@ -140,69 +141,6 @@ function limitLabel(kind: string): string {
   return `Theo mô hình · ${kind}`
 }
 
-function sessionStatus(value: unknown): string {
-  const statuses: Record<string, string> = {
-    ...STATUS, active: '● Đang chạy', busy: '● Đang chạy',
-    thinking: 'Đang suy nghĩ', working: 'Đang làm việc',
-    stopped: 'Đã dừng', closed: 'Đã đóng', ended: 'Đã kết thúc',
-  }
-  return typeof value === 'string' ? statuses[value] ?? 'Chưa rõ' : 'Chưa rõ'
-}
-
-function waitingLabel(value: unknown): string {
-  const labels: Record<string, string> = {
-    user: 'người dùng', input: 'nhập liệu', prompt: 'nhập liệu',
-    permission: 'cấp quyền', approval: 'phê duyệt', tool: 'công cụ',
-    model: 'mô hình', response: 'phản hồi', agent: 'agent',
-  }
-  return typeof value === 'string' && value ? labels[value] ?? 'phản hồi' : '—'
-}
-
-/** Đọc PID từ CSV của tasklist; null nghĩa là không có kết quả đáng tin cậy. */
-export function taskPids(csv: string): number[] | null {
-  const pids: number[] = []
-  for (const line of csv.split(/\r?\n/)) {
-    const match = /^"(?:[^"]|"")*","(\d+)"/.exec(line.trim())
-    if (match) pids.push(Number(match[1]))
-  }
-  return pids.length ? pids : null
-}
-
-/** Chỉ đọc file JSON thông thường, chiếu vào allow-list; không giữ object gốc. */
-export async function otherSessions(
-  $: CoreEngineInterface, directory: string, ownId: string, now: number,
-  alive: readonly number[] | null,
-): Promise<OtherSession[] | null> {
-  try {
-    const entries = await $.fs.list(directory)
-    const result: OtherSession[] = []
-    for (const entry of entries) {
-      if (entry.kind !== 'file' || entry.isLink || !/\.json$/i.test(entry.name)
-        || /[\\/:]/.test(entry.name) || entry.name === `${ownId}.json`) continue
-      const raw: unknown = JSON.parse(await $.fs.read(`${directory}/${entry.name}`))
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
-      // Không spread/serialize raw: chỉ các trường dưới đây được phép vào state.
-      const data = raw as Record<string, unknown>
-      const id = clean(data.sessionId) || clean(data.id) || entry.name.slice(0, -5)
-      if (id === ownId) continue
-      const pid = typeof data.pid === 'number' ? data.pid : Number(data.pid)
-      if (alive !== null && (!Number.isInteger(pid) || !alive.includes(pid))) continue
-      const stamp = typeof data.statusUpdatedAt === 'number' ? data.statusUpdatedAt
-        : typeof data.statusUpdatedAt === 'string' ? Date.parse(data.statusUpdatedAt) : NaN
-      const updatedAt = Number.isFinite(stamp) ? stamp : entry.mtimeMs
-      const cwd = clean(data.cwd, 1024).replace(/[\\/]+$/, '')
-      result.push({
-        id, name: clean(data.name) || 'Phiên chưa đặt tên',
-        folder: cwd.split(/[\\/]/).pop() || '—', status: sessionStatus(data.status),
-        waitingFor: waitingLabel(data.waitingFor), statusUpdatedAt: updatedAt,
-        age: elapsed(updatedAt, now),
-      })
-    }
-    return result.sort((a, b) => b.statusUpdatedAt - a.statusUpdatedAt).slice(0, 200)
-  } catch { return null }
-}
-
-
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : undefined
@@ -252,6 +190,7 @@ export function parseCodexRollout(text: string): CodexSummary {
       summary.lastAt = Math.max(summary.lastAt ?? at, at)
       if (entry.type === 'session_meta' && typeof payload.cwd === 'string') {
         summary.folder = clean(payload.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()) || '—'
+        summary.cwd = normalizePath(payload.cwd)
       }
       if (tool && typeof payload.name === 'string') {
         summary.tools++
@@ -299,6 +238,22 @@ export function codexWindowText(window: CodexWindow, now: number): string {
   const filled = Math.round(left / 10)
   const reset = resetText(window.resetsAt === undefined ? undefined : new Date(window.resetsAt * 1000).toISOString(), now)
   return `${label} [${'█'.repeat(filled) + '░'.repeat(10 - filled)}] ${left}% còn lại · ${reset}`
+}
+
+/** Một rollout đã quét; cwd đầy đủ chỉ nằm ở đây, không vào atom. */
+export type ScannedRun = CodexRun & { cwd?: string; startedAt?: number }
+type CodexScan = { limits: CodexData['limits']; runs: ScannedRun[] }
+const MAX_LAUNCHES = 32
+const MAX_SESSION_RUNS = 16
+const CLAIM_BEFORE_MS = 5000
+const CLAIM_AFTER_MS = 90000
+
+/** Giờ bắt đầu ghi trong tên file (giờ địa phương), dùng khi không đọc được log. */
+function rolloutStart(path: string): number | undefined {
+  const match = /rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/.exec(path)
+  if (!match) return undefined
+  const [, year, month, day, hour, minute, second] = match.map(Number)
+  return new Date(year, month - 1, day, hour, minute, second).getTime()
 }
 
 type CodexCacheEntry = { size: number; mtime: number; summary: CodexSummary | null }
@@ -380,7 +335,9 @@ async function readCodexEdges($: CoreEngineInterface, path: string): Promise<Cod
 }
 
 /** Chỉ list sessions/YYYY/MM/DD và đọc tối đa 8 rollout thường, không theo symlink. */
-export async function readCodex($: CoreEngineInterface, home: string, now: number): Promise<CodexData | null> {
+export async function readCodex(
+  $: CoreEngineInterface, home: string, now: number, keep: ReadonlySet<string> = new Set(),
+): Promise<CodexScan | null> {
   try {
     const root = home.replace(/\\/g, '/').replace(/\/+$/, '')
     if (!root || /^\/\//.test(root) || !/^(?:[A-Za-z]:\/|\/)/.test(root)
@@ -415,10 +372,12 @@ export async function readCodex($: CoreEngineInterface, home: string, now: numbe
         }
       }
     }
-    const newest = candidates.sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path)).slice(0, 8)
-    const keep = new Set(newest.map(file => file.path))
-    for (const path of codexCache.keys()) if (!keep.has(path)) codexCache.delete(path)
-    const runs: CodexRun[] = []
+    candidates.sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path))
+    // Phiên khác chạy nhiều cũng không đẩy được lần chạy đã ghép của phiên này ra ngoài.
+    const newest = [...candidates.slice(0, 8), ...candidates.slice(8).filter(file => keep.has(file.path))]
+    const reading = new Set(newest.map(file => file.path))
+    for (const path of codexCache.keys()) if (!reading.has(path)) codexCache.delete(path)
+    const runs: ScannedRun[] = []
     let limits: CodexData['limits'] = null
     for (const file of newest) {
       try {
@@ -437,6 +396,7 @@ export async function readCodex($: CoreEngineInterface, home: string, now: numbe
             id: file.path, folder: '—', status: now - stat.mtimeMs <= 120000 ? 'running' : 'stopped',
             lastTool: 'Chưa đọc được log', tools: 0, partial: true, tokens: null,
             elapsed: '<1m', lastAt: stat.mtimeMs,
+            ...(rolloutStart(file.path) === undefined ? {} : { startedAt: rolloutStart(file.path) }),
           })
           continue
         }
@@ -447,6 +407,7 @@ export async function readCodex($: CoreEngineInterface, home: string, now: numbe
           lastTool: summary.lastTool, tools: summary.tools, tokens: summary.tokens,
           ...(summary.partial ? { partial: true } : {}),
           elapsed: elapsed(summary.firstAt, summary.lastAt), lastAt: summary.lastAt,
+          startedAt: summary.firstAt, ...(summary.cwd ? { cwd: summary.cwd } : {}),
         })
       } catch { /* Một rollout lỗi không được che các phiên và limit còn đọc được. */ }
     }
@@ -458,14 +419,133 @@ export async function readCodex($: CoreEngineInterface, home: string, now: numbe
       }
     }
     runs.sort((a, b) => b.lastAt - a.lastAt)
-    const recent = runs.filter(run => run.status !== 'running' && now - run.lastAt <= 86400000).slice(0, 3)
-    return { limits, runs: [...runs.filter(run => run.status === 'running'), ...recent] }
+    return { limits, runs }
   } catch { return null }
 }
 
 const CODEX_TOOLS = new Set([
   'mcp__codex-cli__ask-codex', 'mcp__codex-cli__batch-codex', 'mcp__codex-cli__brainstorm',
 ])
+
+/** So sánh đường dẫn giữa Windows, Git Bash và log Codex. */
+export function normalizePath(path: string): string {
+  const slashed = path.replace(/\\/g, '/').replace(/\/+$/, '')
+  const drive = /^\/([A-Za-z])(\/.*)?$/.exec(slashed)
+  return (drive ? `${drive[1]}:${drive[2] ?? ''}` : slashed).toLowerCase()
+}
+
+type ShellToken = { text: string; dynamic: boolean }
+
+/** Tách lệnh theo dấu ngăn lệnh, tôn trọng dấu nháy; biến shell đánh dấu là chưa biết giá trị. */
+function shellSegments(command: string): ShellToken[][] {
+  const segments: ShellToken[][] = [[]]
+  let token: ShellToken | null = null
+  let quote = ''
+  const flush = (): void => { if (token) segments[segments.length - 1].push(token); token = null }
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) { quote = ''; continue }
+      token ??= { text: '', dynamic: false }
+      token.text += char
+      if (quote === '"' && (char === '$' || char === '`' || char === '%')) token.dynamic = true
+      continue
+    }
+    if (char === "'" || char === '"') { quote = char; token ??= { text: '', dynamic: false }; continue }
+    if (/\s/.test(char) && char !== '\n') { flush(); continue }
+    if (';&|()\n'.includes(char)) { flush(); segments.push([]); continue }
+    token ??= { text: '', dynamic: false }
+    token.text += char
+    if (char === '$' || char === '`' || char === '%') token.dynamic = true
+  }
+  flush()
+  return segments
+}
+
+const baseName = (path: string): string => path.split(/[\\/]/).pop() ?? path
+const isCodexBinary = (text: string): boolean => /^codex(?:\.cmd|\.ps1|\.js|\.exe)?$/i.test(baseName(text))
+const absolutePath = (token: ShellToken | undefined): string | undefined =>
+  token && !token.dynamic && /^(?:[A-Za-z]:[\\/]|\/)/.test(token.text) ? normalizePath(token.text) : undefined
+const CODEX_VALUE_FLAGS = new Set(['-c', '--config', '-i', '--image', '-m', '--model', '-p', '--profile',
+  '-s', '--sandbox', '-a', '--ask-for-approval', '--add-dir', '--color', '-o', '--output-last-message', '--output-schema'])
+
+/** Nhận diện lệnh shell thật sự chạy `codex exec`; null nếu lệnh chỉ nhắc tới codex. */
+export function parseCodexCommand(command: string): { cwd?: string } | null {
+  let shellCwd: string | undefined
+  for (const tokens of shellSegments(command)) {
+    let index = 0
+    while (/^[A-Za-z_]\w*=/.test(tokens[index]?.text ?? '')) index++
+    const head = tokens[index]
+    if (!head) continue
+    if (/^(?:cd|pushd|Set-Location)$/i.test(head.text)) { shellCwd = absolutePath(tokens[index + 1]); continue }
+    if (/^(?:npx|node)(?:\.cmd|\.exe)?$/i.test(baseName(head.text))) {
+      index++
+      while (tokens[index]?.text.startsWith('-')) index++
+    }
+    if (!tokens[index] || !isCodexBinary(tokens[index].text)) continue
+    let subcommand: string | undefined
+    let cwd: string | undefined
+    for (let at = index + 1; at < tokens.length; at++) {
+      const text = tokens[at].text
+      if (text === '-C' || text === '--cd') cwd = absolutePath(tokens[++at])
+      else if (text.startsWith('--cd=')) cwd = absolutePath({ ...tokens[at], text: text.slice(5) })
+      else if (CODEX_VALUE_FLAGS.has(text)) at++
+      else if (!text.startsWith('-')) subcommand ??= text
+      if (subcommand !== undefined && subcommand !== 'exec' && subcommand !== 'e') break
+    }
+    if (subcommand !== 'exec' && subcommand !== 'e') continue
+    const dir = cwd ?? shellCwd
+    return dir ? { cwd: dir } : {}
+  }
+  return null
+}
+
+function codexLaunch(e: ToolCallInput): { cwd?: string } | null {
+  const tool: string = e.tool
+  if (CODEX_TOOLS.has(tool)) {
+    const dir = 'cd' in e && typeof e.cd === 'string' ? e.cd
+      : 'workingDir' in e && typeof e.workingDir === 'string' ? e.workingDir : ''
+    return dir ? { cwd: normalizePath(dir) } : {}
+  }
+  if ((tool === 'Bash' || tool === 'PowerShell') && 'command' in e && typeof e.command === 'string') {
+    return parseCodexCommand(e.command)
+  }
+  return null
+}
+
+/** Mỗi lần gọi nhận tối đa một rollout gần giờ gọi nhất; rollout đã ghép giữ nguyên suốt phiên. */
+export function claimCodexRuns(
+  runs: readonly ScannedRun[], launches: readonly CodexLaunch[], claims: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const ids = new Set(launches.map(launch => launch.id))
+  const result = Object.fromEntries(Object.entries(claims).filter(([id]) => ids.has(id)))
+  const taken = new Set(Object.values(result))
+  for (const launch of [...launches].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))) {
+    if (result[launch.id]) continue
+    let best: ScannedRun | undefined
+    let bestGap = Infinity
+    for (const run of runs) {
+      if (taken.has(run.id) || run.startedAt === undefined) continue
+      const delta = run.startedAt - launch.at
+      if (delta < -CLAIM_BEFORE_MS || delta > CLAIM_AFTER_MS) continue
+      if (launch.cwd && run.cwd && launch.cwd !== run.cwd) continue
+      if (Math.abs(delta) < bestGap || (Math.abs(delta) === bestGap && best && run.id < best.id)) {
+        best = run
+        bestGap = Math.abs(delta)
+      }
+    }
+    if (best) { result[launch.id] = best.id; taken.add(best.id) }
+  }
+  return result
+}
+
+/** Chỉ đưa vào state các lần chạy của phiên này và bỏ đường dẫn đầy đủ. */
+function sessionRuns(runs: readonly ScannedRun[], claims: Readonly<Record<string, string>>): CodexRun[] {
+  const owned = new Set(Object.values(claims))
+  return runs.filter(run => owned.has(run.id)).slice(0, MAX_SESSION_RUNS).map(({ cwd, startedAt, ...run }) => {
+    void cwd; void startedAt
+    return run
+  })
+}
 
 function codexOutcome(value: unknown, rejected: boolean): 'success' | 'error' | 'timeout' {
   const envelope = object(value)
@@ -507,11 +587,7 @@ function orderedAgents(agents: AgentRow[]): { row: AgentRow; depth: number }[] {
 type PollRuntime = {
   refreshing: boolean
   lastUsage: number
-  lastSessions: number
   lastCodex: number
-  lastPidCheck: number
-  alivePids: number[] | null
-  pidCheckFailed: boolean
   agentsRevision: number
   usageRevision: number
 }
@@ -555,46 +631,25 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
           })
         })
       }
-      if (now - runtime.lastSessions >= 15000) {
-        runtime.lastSessions = now
-        await safely(async () => {
-          let sessions: OtherSession[] | null = null
-          try {
-            const config = await $.env.get('CLAUDE_CONFIG_DIR')
-            const profile = await $.env.get('USERPROFILE')
-            const home = profile || await $.env.get('HOME')
-            const directory = config || (home ? `${home}/.claude` : '')
-            const windows = (await $.env.get('OS')) === 'Windows_NT' || /^[A-Za-z]:[\\/]/.test(home ?? directory)
-            if (windows && now - runtime.lastPidCheck >= 15000) {
-              runtime.lastPidCheck = now
-              // Thất bại => không kết luận PID chết; ẩn phần này đến lần kiểm tra sau.
-              runtime.alivePids = null
-              runtime.pidCheckFailed = true
-              try {
-                const result = await $.process.run(['tasklist', '/FO', 'CSV', '/NH'], { timeoutMs: 2500 })
-                runtime.alivePids = result.exitCode === 0 && !result.isStdoutTruncated ? taskPids(result.stdout) : null
-                runtime.pidCheckFailed = runtime.alivePids === null
-              } catch { /* Giữ alivePids = null: không đánh dấu PID chết. */ }
-            }
-            if (directory && !(windows && runtime.pidCheckFailed)) {
-              sessions = await otherSessions($, `${directory}/sessions`, await $.session.id(), now, windows ? runtime.alivePids : null)
-            }
-          } catch { sessions = null }
-          await change($, state => { state.sessions = sessions })
-        })
-      }
-
       if (now - runtime.lastCodex >= 15000) {
         runtime.lastCodex = now
         await safely(async () => {
-          let codex: CodexData | null = null
+          let scan: CodexScan | null = null
           try {
             const configured = await $.env.get('CODEX_HOME')
             const profile = configured ? undefined : await $.env.get('USERPROFILE')
             const home = configured || (profile ? `${profile}/.codex` : '')
-            if (home) codex = await readCodex($, home, now)
+            const held = await $.state.get(REF)
+            const claims = held.value?.shape === SHAPE ? held.value.value.codexClaims : undefined
+            if (home) scan = await readCodex($, home, now, new Set(Object.values(claims ?? {})))
           } catch { /* Mọi lỗi chỉ ẩn telemetry Codex. */ }
-          await change($, state => { state.codex = codex })
+          await change($, state => {
+            if (!scan) { state.codex = null; return }
+            const claims = claimCodexRuns(scan.runs, state.codexLaunches ?? [], state.codexClaims ?? {})
+            if (Object.keys(claims).length) state.codexClaims = claims
+            else delete state.codexClaims
+            state.codex = { limits: scan.limits, runs: sessionRuns(scan.runs, claims) }
+          })
         })
       }
     } finally { runtime.refreshing = false }
@@ -605,8 +660,7 @@ export const register: Register = (on, options) => {
   void options
   let tick: Timer | undefined
   const runtime: PollRuntime = {
-    refreshing: false, lastUsage: -Infinity, lastSessions: -Infinity, lastCodex: -Infinity,
-    lastPidCheck: -Infinity, alivePids: null, pidCheckFailed: false,
+    refreshing: false, lastUsage: -Infinity, lastCodex: -Infinity,
     agentsRevision: 0, usageRevision: 0,
   }
 
@@ -616,7 +670,7 @@ export const register: Register = (on, options) => {
     })
     void $.ui.open({ id: PANE, title: 'Theo dõi agent' }).catch(() => {})
     tick?.cancel()
-    runtime.lastUsage = runtime.lastSessions = runtime.lastCodex = runtime.lastPidCheck = -Infinity
+    runtime.lastUsage = runtime.lastCodex = -Infinity
     tick = $.clock.every(3000, () => { void refresh($, runtime).catch(() => {}) })
     void refresh($, runtime).catch(() => {})
     return await next(e)
@@ -637,6 +691,7 @@ export const register: Register = (on, options) => {
     runtime.agentsRevision++
     const id = e.agentId ?? MAIN
     const isCodex = CODEX_TOOLS.has(e.tool)
+    const launch = codexLaunch(e)
     let startedAt: number | undefined
     await safely(async () => {
       const now = await $.clock.now()
@@ -648,6 +703,8 @@ export const register: Register = (on, options) => {
         delete row.stoppedAt
         row.active = [...row.active.filter(call => call.id !== e.tool_use_id),
           { id: e.tool_use_id, text: toolActivity(e) }].slice(-32)
+        if (launch) state.codexLaunches = [...(state.codexLaunches ?? []).filter(item => item.id !== e.tool_use_id),
+          { id: e.tool_use_id, at: now, ...launch }].slice(-MAX_LAUNCHES)
         if (isCodex) addFeed(state, {
           at: now, kind: 'codex', from: MAIN, to: CODEX,
           text: clean('prompt' in e ? e.prompt : ''),
@@ -783,7 +840,7 @@ export const register: Register = (on, options) => {
     const codexRows = state.codex?.limits
       ? 2 + Number(!!state.codex.limits.primary) + Number(!!state.codex.limits.secondary) + Number(state.codex.limits.reached) : 2
     const baseRows = 10 + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
-      + (e.props.view.agentId ? 1 : 0) + (state.sessions === null ? 0 : 1 + Math.max(1, state.sessions.length))
+      + (e.props.view.agentId ? 1 : 0)
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
     const scene = Svg ? buildScene(state, now) : undefined
     const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
@@ -794,7 +851,7 @@ export const register: Register = (on, options) => {
     const activityBar = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="4" viewBox="0 0 240 4"><rect width="240" height="4" fill="#e7ddc6"/><rect width="48" height="4" fill="#79a49b"><animate attributeName="x" values="-48;240" dur="2s" repeatCount="indefinite"/></rect></svg>'
     const cards = (rows: NonNullable<typeof scene>['agents'], small: boolean) => rows.map(agent => {
       const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
-        : agent.kind === 'subagent' ? 'Agent con Claude' : 'Phiên Claude khác'
+        : 'Agent con Claude'
       const status = agent.status === 'stopped' ? CODEX_STATUS.stopped : STATUS[agent.status]
       const detail = `${agent.tool} · ${agent.tools}${agent.partial ? '+' : ''} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
       const { fiveHourLeft, weekLeft, binding, share, account } = agent.limit
@@ -872,6 +929,7 @@ export const register: Register = (on, options) => {
           {cards(working, false)}
           <Text bold>Đang nghỉ · {resting.length}</Text>
           {cards(resting, true)}
+          {!state.codex?.runs.length && <Text dimColor>{NO_CODEX_RUNS}</Text>}
         </> : <>
         <Text bold>Các agent</Text>
         {agents.length === 0 && <Text dimColor>Claude Code · ○ Rảnh · Chưa có hoạt động</Text>}
@@ -885,7 +943,7 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
         <Text bold>Codex CLI</Text>
-        {!state.codex?.runs.length && <Text dimColor>Chưa có hoạt động Codex</Text>}
+        {!state.codex?.runs.length && <Text dimColor>{NO_CODEX_RUNS}</Text>}
         {state.codex?.runs.map(run => <Text>
           {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools}{run.partial ? '+' : ''} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
         </Text>)}
@@ -896,11 +954,6 @@ export const register: Register = (on, options) => {
         {state.feed.slice(0, feedRoom).map(item => (
           <Text>{clockText(item.at)} {agentName(state, item.from)} → {agentName(state, item.to)}: {item.kind === 'spawn' ? 'giao việc ' : ''}{item.text}</Text>
         ))}
-        {state.sessions !== null && <Box flexDirection="column">
-          <Text bold>Phiên khác trên máy</Text>
-          {state.sessions.length === 0 && <Text dimColor>Không có phiên khác đang chạy.</Text>}
-          {state.sessions.map(session => <Text>{session.name} · {session.folder} · {session.status} · chờ: {session.waitingFor} · {session.age}</Text>)}
-        </Box>}
       </Box>
     )
   })
