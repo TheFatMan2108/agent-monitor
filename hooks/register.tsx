@@ -3,7 +3,7 @@ import type {
   AgentInfo, AgentStatus, CoreEngineInterface, Register, SessionContextUsage,
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
-import type { AgentRow, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
+import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
 import { buildScene, remaining, renderAvatarSvg, renderOfficeSvg } from './office'
 
 export { remaining } from './office'
@@ -11,7 +11,7 @@ export { remaining } from './office'
 const PANE = 'agent-monitor'
 const MAIN = '@main'
 const CODEX = '@codex'
-const SHAPE = 'monitor-6'
+const SHAPE = 'monitor-7'
 const REF = { plugin: 'agent-monitor', key: 'monitor' } as const
 const INITIAL: MonitorState = {
   agents: [], limits: [], contextRemaining: null, feed: [], codex: null,
@@ -67,6 +67,10 @@ function cap(state: MonitorState): void {
   const remove = new Set(finished.slice(0, Math.max(0, finished.length - MAX_HISTORY)).map(row => row.id))
   state.agents = state.agents.filter(row => !remove.has(row.id))
   state.feed = state.feed.slice(0, 50)
+  if (state.background) state.background = [
+    ...state.background.filter(task => task.status === 'running').slice(-MAX_BACKGROUND_RUNNING),
+    ...state.background.filter(task => task.status !== 'running').slice(-MAX_BACKGROUND_DONE),
+  ]
 }
 
 // CAS bảo vệ các tool chạy đồng thời. So sánh JSON trước khi ghi để phiên rảnh
@@ -100,6 +104,7 @@ function addFeed(state: MonitorState, item: FeedItem): void {
 function agentName(state: MonitorState, id: string): string {
   if (id === MAIN) return 'Claude Code'
   if (id === CODEX) return 'Codex CLI'
+  if (id === BACKGROUND) return 'Task ngầm'
   return state.agents.find(row => row.id === id || row.name === id)?.name ?? clean(id)
 }
 
@@ -547,6 +552,98 @@ function sessionRuns(runs: readonly ScannedRun[], claims: Readonly<Record<string
   })
 }
 
+const BACKGROUND = '@background'
+const MAX_BACKGROUND_RUNNING = 32
+const MAX_BACKGROUND_DONE = 8
+const BACKGROUND_DONE_SHOWN = 5
+const BACKGROUND_DONE_WINDOW_MS = 600000
+const BACKGROUND_KINDS: Record<BackgroundKind, string> = {
+  shell: 'Lệnh nền', monitor: 'Monitor', workflow: 'Workflow', mcp: 'MCP task', other: 'Task nền',
+}
+const BACKGROUND_STATUS: Record<BackgroundTask['status'], string> = {
+  running: '● Đang chạy', completed: '✓ Hoàn tất', failed: '✗ Thất bại', killed: '■ Đã dừng', done: '✓ Đã xong',
+}
+
+function backgroundKind(type: string): BackgroundKind {
+  return /shell|bash/i.test(type) ? 'shell' : /monitor/i.test(type) ? 'monitor'
+    : /workflow/i.test(type) ? 'workflow' : /mcp/i.test(type) ? 'mcp' : 'other'
+}
+
+function startBackground(state: MonitorState, task: { taskId: string; kind: BackgroundKind; label: string; toolUseId?: string }, now: number): void {
+  const list = state.background ??= []
+  const known = list.find(item => item.taskId === task.taskId)
+  if (known) {
+    if (task.toolUseId) known.toolUseId = task.toolUseId
+    return
+  }
+  list.push({ ...task, id: task.taskId, status: 'running', startedAt: now, elapsed: '<1m' })
+  addFeed(state, { at: now, kind: 'background', from: BACKGROUND, to: MAIN, text: 'bắt đầu: ' + task.label })
+}
+
+function finishBackground(state: MonitorState, task: BackgroundTask, status: BackgroundTask['status'], now: number): void {
+  if (task.status !== 'running') return
+  task.status = status
+  task.endedAt = now
+  task.elapsed = elapsed(task.startedAt, now)
+  addFeed(state, { at: now, kind: 'background', from: BACKGROUND, to: MAIN, text: BACKGROUND_STATUS[status] + ': ' + task.label })
+}
+
+/** Lấy task ngầm vừa được tạo từ kết quả tool; null nếu lời gọi không tạo task. */
+function launchedBackground(e: ToolCallInput, value: unknown): { taskId: string; kind: BackgroundKind; label: string } | null {
+  const envelope = object(value)
+  const output = object(envelope?.result)
+  if (!envelope || !output || envelope.isError === true) return null
+  const tool: string = e.tool
+  const description = 'description' in e ? clean(e.description, 100) : ''
+  const command = 'command' in e ? clean(e.command, 60) : ''
+  if (tool === 'Bash' || tool === 'PowerShell') {
+    return typeof output.backgroundTaskId === 'string' && output.backgroundTaskId
+      ? { taskId: clean(output.backgroundTaskId), kind: 'shell', label: description || command || BACKGROUND_KINDS.shell } : null
+  }
+  if ((tool === 'Monitor' || tool === 'Workflow') && typeof output.taskId === 'string' && output.taskId) {
+    const kind: BackgroundKind = tool === 'Monitor' ? 'monitor' : 'workflow'
+    const name = tool === 'Workflow' ? clean(output.workflowName, 100) : ''
+    return { taskId: clean(output.taskId), kind, label: name || description || command || BACKGROUND_KINDS[kind] }
+  }
+  return null
+}
+
+type InFlightTask = { id: string; type: string; status: string; description?: string; command?: string; name?: string; server?: string; tool?: string }
+type CronSummary = { id: string; schedule: string; recurring: boolean; prompt: string }
+
+/** Đối chiếu với danh sách đầy đủ engine gửi khi hết lượt; task biến mất nghĩa là đã xong. */
+export function reconcileBackground(
+  state: MonitorState, tasks: readonly InFlightTask[] | undefined, crons: readonly CronSummary[] | undefined, now: number,
+): void {
+  if (crons) state.scheduled = crons.slice(0, 16).map(cron => ({
+    id: clean(cron.id), schedule: clean(cron.schedule, 40), recurring: cron.recurring === true, prompt: clean(cron.prompt, 80),
+  }))
+  if (!tasks) return
+  // Subagent và teammate đã có nhân vật và thẻ riêng ở mục agent.
+  const live = tasks.filter(task => !/^(?:subagent|teammate)$/i.test(task.type))
+  const ids = new Set(live.map(task => clean(task.id)))
+  for (const task of live) {
+    const kind = backgroundKind(task.type)
+    const label = clean(task.description, 100) || clean(task.name, 100) || clean(task.command, 60) || clean(task.tool, 60) || BACKGROUND_KINDS[kind]
+    startBackground(state, { taskId: clean(task.id), kind, label }, now)
+  }
+  for (const task of state.background ?? []) {
+    if (task.status === 'running' && !ids.has(task.taskId)) finishBackground(state, task, 'done', now)
+  }
+}
+
+/** Đọc thẻ định danh và trạng thái trong thông báo; không giữ phần tóm tắt. */
+export function parseTaskNotification(text: string): { taskId?: string; toolUseId?: string; status?: string } | null {
+  if (!text.includes('<task-notification>')) return null
+  const tag = (name: string): string | undefined => new RegExp('<' + name + '>([^<]*)</' + name + '>').exec(text)?.[1]?.trim() || undefined
+  return { taskId: tag('task-id'), toolUseId: tag('tool-use-id'), status: tag('status') }
+}
+
+function notifiedStatus(status: string | undefined): BackgroundTask['status'] {
+  return status === 'completed' ? 'completed' : status === 'failed' ? 'failed'
+    : status === 'killed' || status === 'stopped' ? 'killed' : 'done'
+}
+
 function codexOutcome(value: unknown, rejected: boolean): 'success' | 'error' | 'timeout' {
   const envelope = object(value)
   const result = object(envelope?.result)
@@ -613,6 +710,7 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
           }
           for (const row of state.agents) row.elapsed = elapsed(row.startedAt, row.stoppedAt ?? now)
           for (const limit of state.limits) limit.reset = resetText(limit.resetsAt, now)
+          for (const task of state.background ?? []) task.elapsed = elapsed(task.startedAt, task.endedAt ?? now)
         })
       })
       if (now - runtime.lastUsage >= 15000) {
@@ -724,6 +822,12 @@ export const register: Register = (on, options) => {
     try {
       const result = await next(e)
       await recordCodex(result, false)
+      await safely(async () => {
+        const launched = launchedBackground(e, result)
+        if (!launched) return
+        const now = await $.clock.now()
+        await change($, state => startBackground(state, { ...launched, toolUseId: e.tool_use_id }, now))
+      })
       return result
     } catch (error) {
       await recordCodex(error, true)
@@ -735,6 +839,38 @@ export const register: Register = (on, options) => {
         if (row) row.active = row.active.filter(call => call.id !== e.tool_use_id)
       }))
     }
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin?.kind === 'task-notification') {
+      await safely(async () => {
+        const notice = parseTaskNotification(e.text)
+        if (!notice) return
+        const now = await $.clock.now()
+        await change($, state => {
+          const task = state.background?.find(item => (notice.taskId && item.taskId === notice.taskId)
+            || (notice.toolUseId && item.toolUseId === notice.toolUseId))
+          if (task) finishBackground(state, task, notifiedStatus(notice.status), now)
+        })
+      })
+    }
+    return await next(e)
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    await safely(async () => {
+      const now = await $.clock.now()
+      await change($, state => reconcileBackground(state, e.background_tasks, e.session_crons, now))
+    })
+    return await next(e)
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    await safely(async () => {
+      const now = await $.clock.now()
+      await change($, state => reconcileBackground(state, e.background_tasks, e.session_crons, now))
+    })
+    return await next(e)
   })
 
   on('turn.start', async ($, e, next) => {
@@ -837,10 +973,15 @@ export const register: Register = (on, options) => {
     const state = await read($, monitor)
     const now = await $.clock.now()
     const agents = orderedAgents(state.agents)
+    const backgroundRunning = (state.background ?? []).filter(task => task.status === 'running')
+    const backgroundShown = [...backgroundRunning, ...(state.background ?? [])
+      .filter(task => task.status !== 'running' && now - (task.endedAt ?? 0) < BACKGROUND_DONE_WINDOW_MS)
+      .slice(-BACKGROUND_DONE_SHOWN).reverse()]
+    const scheduled = state.scheduled ?? []
     const codexRows = state.codex?.limits
       ? 2 + Number(!!state.codex.limits.primary) + Number(!!state.codex.limits.secondary) + Number(state.codex.limits.reached) : 2
     const baseRows = 10 + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
-      + (e.props.view.agentId ? 1 : 0)
+      + (e.props.view.agentId ? 1 : 0) + 1 + Math.max(1, backgroundShown.length) + (scheduled.length ? 1 + scheduled.length : 0)
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
     const scene = Svg ? buildScene(state, now) : undefined
     const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
@@ -949,6 +1090,15 @@ export const register: Register = (on, options) => {
         </Text>)}
         </>}
         {e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}
+        <Text bold>Task ngầm · {backgroundRunning.length}</Text>
+        {backgroundShown.length === 0 && <Text dimColor>Không có task ngầm</Text>}
+        {backgroundShown.map(task => <Text dimColor={task.status !== 'running'} color={task.status === 'failed' ? 'error' : undefined}>
+          {BACKGROUND_STATUS[task.status]} · {BACKGROUND_KINDS[task.kind]} · {task.label} · {task.elapsed}
+        </Text>)}
+        {scheduled.length > 0 && <Box flexDirection="column">
+          <Text bold>Đã lên lịch · {scheduled.length}</Text>
+          {scheduled.map(cron => <Text dimColor>{cron.recurring ? 'Lặp lại' : 'Một lần'} · {cron.schedule} · {cron.prompt}</Text>)}
+        </Box>}
         <Text bold>Tương tác</Text>
         {state.feed.length === 0 && <Text dimColor>Chưa có tương tác.</Text>}
         {state.feed.slice(0, feedRoom).map(item => (

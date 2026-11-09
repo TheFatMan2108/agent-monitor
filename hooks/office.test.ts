@@ -399,3 +399,30 @@ test('scene làm tròn limit, SVG chỉ đổi khi phần trăm nguyên đổi h
   expect(renderOfficeSvg(buildScene(data, NOW + 3000)) === svg).toBe(false)
   expect(renderOfficeSvg(buildScene(data, NOW + 60000)).includes('Limit Codex: 5 giờ chưa rõ')).toBe(true)
 })
+
+
+function backgroundTask(id: string, kind: 'shell' | 'monitor' = 'shell', status: 'running' | 'done' = 'running', label = 'Chạy test') {
+  return { id, taskId: id, kind, label, status, startedAt: NOW, elapsed: '<1m' }
+}
+
+test('mỗi task ngầm đang chạy là một robot; tối đa 6, phần dư hiện +N, escape nhãn, SVG ổn định', () => {
+  const data = state()
+  data.background = [backgroundTask('a'), backgroundTask('b', 'monitor', 'running', '<script>&"'), backgroundTask('done', 'shell', 'done')]
+  const scene = buildScene(data, NOW)
+  expect(scene.background?.map(task => task.id)).toEqual(['a', 'b'])
+  const svg = renderOfficeSvg(scene)
+  expect((svg.match(/data-layer="background-task"/g) ?? []).length).toBe(2)
+  expect(svg.includes('<script')).toBe(false)
+  expect(svg.includes('&lt;script&gt;&amp;&quot;')).toBe(true)
+  expect(svg.includes('Task ngầm · Chạy test · Đang chạy')).toBe(true)
+  expect(renderOfficeSvg(buildScene(data, NOW + 5000))).toBe(svg)
+  data.background = Array.from({ length: 9 }, (_, i) => backgroundTask('t' + i))
+  const full = buildScene(data, NOW)
+  expect(full.backgroundOverflow).toBe(3)
+  const many = renderOfficeSvg(full)
+  expect((many.match(/data-layer="background-task"/g) ?? []).length).toBe(6)
+  expect(many.includes('+3')).toBe(true)
+  expect(new Set(many.match(/<[a-zA-Z]+/g)).has('<use')).toBe(false)
+  expect(buildScene(state(), NOW).background).toEqual([])
+  expect(renderOfficeSvg(buildScene(state(), NOW)).includes('background-task')).toBe(false)
+})

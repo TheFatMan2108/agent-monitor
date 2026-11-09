@@ -1,4 +1,4 @@
-import type { CodexWindow, MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
+import type { BackgroundKind, CodexWindow, MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
 
 export type { OfficeAgent, OfficeScene } from '../types'
 
@@ -125,7 +125,10 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
     if (from && to && from !== to) interactions.push({ from, to, kind: item.kind })
     if (interactions.length === 6) break
   }
-  return { agents, interactions, overflow }
+  const running = (state.background ?? []).filter(task => task.status === 'running')
+    .sort((a, b) => a.startedAt - b.startedAt || compareId(a.id, b.id))
+  const background = running.slice(0, 6).map(({ id, kind, label }) => ({ id, kind, label }))
+  return { agents, interactions, overflow, background, backgroundOverflow: running.length - background.length }
 }
 
 function hash(value: string): number {
@@ -357,6 +360,26 @@ function statusBubble(agent: OfficeAgent): string {
   return `<g transform="translate(${x - 26} ${y + 2})">${rect(0, 0, 12, 11, OUTLINE)}${rect(1, 1, 10, 9, color)}${rect(10, 10, 3, 3, OUTLINE)}${rect(10, 10, 2, 2, color)}${text(6, 8, bubble, '#473d3d', 8)}<animate attributeName="opacity" values="1;.7;1" dur="2s" repeatCount="indefinite"/></g>`
 }
 
+const ROBOT = ['....aa....', '....aa....', '.oooooooo.', 'obbbbbbbbo', 'obeebbeebo', 'obbbbbbbbo',
+  '.oooooooo.', '..occcco..', '.occcccco.', '..occcco..', '..oo..oo..']
+const ROBOT_COLORS: Record<BackgroundKind, string> = {
+  shell: '#5f9c95', monitor: '#d9a64f', workflow: '#9a7fb0', mcp: '#6f8fb8', other: '#8d9398',
+}
+const ROBOTS_SHOWN = 6
+
+/** Mỗi task ngầm đang chạy là một robot đi tuần ở hành lang dưới khu làm việc. */
+function backgroundRobots(scene: OfficeScene): string {
+  let art = ''
+  const tasks = scene.background ?? []
+  tasks.slice(0, ROBOTS_SHOWN).forEach((task, index) => {
+    const body = pixels(ROBOT, { o: OUTLINE, b: '#e6e2d6', e: '#3f8f7f', a: ROBOT_COLORS[task.kind], c: ROBOT_COLORS[task.kind] })
+    art += '<g transform="translate(' + (34 + index * 21) + ' 196)" data-layer="background-task"><title>Task ngầm · ' + xml(task.label) + ' · Đang chạy</title><g>' + body
+      + '<animateTransform attributeName="transform" type="translate" values="0 0;4 0;0 0;-4 0;0 0" dur="3.2s" begin="' + (index * 0.4).toFixed(1) + 's" repeatCount="indefinite"/></g></g>'
+  })
+  if (scene.backgroundOverflow) art += rect(160, 196, 16, 10, '#f1deb5') + text(168, 203.5, '+' + scene.backgroundOverflow, '#765d4c', 6)
+  return art
+}
+
 function draw(scene: OfficeScene, detail: boolean): string {
   let art = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 320 210" shape-rendering="crispEdges">'
   art += room(detail)
@@ -376,6 +399,7 @@ function draw(scene: OfficeScene, detail: boolean): string {
   }
   if (scene.overflow.work) art += rect(178, 194, 26, 11, '#f1deb5') + text(191, 202, `+${scene.overflow.work}`, '#765d4c', 8)
   if (scene.overflow.lounge) art += rect(286, 194, 26, 11, '#ecdfb9') + text(299, 202, `+${scene.overflow.lounge}`, '#597366', 8)
+  art += backgroundRobots(scene)
   for (const agent of visible) art += statusBubble(agent) + limitBar(agent)
   // Envelopes are the final layer, head-to-head, with a cheap soft dotted trail.
   for (const item of scene.interactions.slice(0, 6)) {

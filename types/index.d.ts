@@ -16,7 +16,7 @@ export type AgentRow = {
 }
 export type FeedItem = {
   at: number
-  kind: 'spawn' | 'send' | 'finish' | 'codex'
+  kind: 'spawn' | 'send' | 'finish' | 'codex' | 'background'
   from: string
   to: string
   text: string
@@ -54,6 +54,19 @@ export type CodexRun = {
   elapsed: string
   lastAt: number
 }
+export type BackgroundKind = 'shell' | 'monitor' | 'workflow' | 'mcp' | 'other'
+export type BackgroundTask = {
+  id: string
+  taskId: string
+  toolUseId?: string
+  kind: BackgroundKind
+  label: string
+  status: 'running' | 'completed' | 'failed' | 'killed' | 'done'
+  startedAt: number
+  endedAt?: number
+  elapsed: string
+}
+export type ScheduledTask = { id: string; schedule: string; recurring: boolean; prompt: string }
 export type CodexLaunch = { id: string; at: number; cwd?: string }
 export type CodexData = { limits: CodexLimits | null; runs: CodexRun[] }
 export type MonitorState = {
@@ -63,6 +76,8 @@ export type MonitorState = {
   feed: FeedItem[]
   codex: CodexData | null
   codexLaunches?: CodexLaunch[]
+  background?: BackgroundTask[]
+  scheduled?: ScheduledTask[]
   codexClaims?: Record<string, string>
   claudeCost?: number | null
   officeSeats?: Record<string, OfficeSeat>
@@ -100,6 +115,8 @@ export type OfficeScene = {
   agents: OfficeAgent[]
   interactions: { from: string; to: string; kind: 'spawn' | 'send' | 'codex' }[]
   overflow: { work: number; lounge: number }
+  background?: { id: string; kind: BackgroundKind; label: string }[]
+  backgroundOverflow?: number
 }
 
 declare module 'claude-code' {

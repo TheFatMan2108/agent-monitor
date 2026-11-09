@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
 import type { CodexLaunch, MonitorState } from '../types'
-import { remaining, resetText, register, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
+import { remaining, resetText, register, parseTaskNotification, reconcileBackground, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
 import { buildScene, renderOfficeSvg } from './office'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
@@ -41,8 +41,8 @@ function setup(on: On, options: {
   let seeded: MonitorState | undefined
   on('state.get', async (_, e, next) => {
     const result = await next(e)
-    if (seeded) return { ...result, value: { ...result.value, value: { shape: 'monitor-6', value: seeded } } }
-    if (options.launches && !held) return { ...result, value: { ...result.value, value: { shape: 'monitor-6', value: {
+    if (seeded) return { ...result, value: { ...result.value, value: { shape: 'monitor-7', value: seeded } } }
+    if (options.launches && !held) return { ...result, value: { ...result.value, value: { shape: 'monitor-7', value: {
       agents: [], limits: [], contextRemaining: null, feed: [], codex: null, codexLaunches: options.launches } } } }
     return result
   })
@@ -1039,7 +1039,7 @@ test('terminal giữ nguyên toàn bộ các dòng chữ, không thêm limit/sha
     'Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.',
     'Các agent', '○ Rảnh · Claude Code · ',
     'Không có công cụ đang chạy · 0 lần gọi · <1m · 0 token',
-    'Codex CLI', 'Chưa có lần gọi Codex trong phiên này', 'Tương tác', 'Chưa có tương tác.',
+    'Codex CLI', 'Chưa có lần gọi Codex trong phiên này', 'Task ngầm · 0', 'Không có task ngầm', 'Tương tác', 'Chưa có tương tác.',
   ])
   expect((await ui.findAll({ type: 'Svg' })).length).toBe(0)
   await ui.unmount()
@@ -1168,5 +1168,134 @@ test('không còn đọc phiên Claude khác hay gọi tasklist', async ($, on) 
   expect(processes).toEqual([])
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: 'Phiên khác trên máy' })).toBe(undefined)
+  await ui.unmount()
+})
+
+
+function bashResult(id: string) { return { result: { stdout: '', stderr: '', backgroundTaskId: id }, text: 'ok' } }
+
+test('lệnh nền, monitor, workflow được theo dõi từ lúc tạo; lệnh thường thì không', async ($, on) => {
+  const { snapshot } = setup(on)
+  let reply: ToolCallResult = bashResult('b1')
+  on('tool.call', () => reply)
+  await start($)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Chạy test', run_in_background: true, tool_use_id: 'u1' })
+  reply = { result: { taskId: 'm1', timeoutMs: 0 }, text: 'ok' }
+  await $.tool.call({ tool: 'Monitor', command: 'tail -f log', description: 'Theo dõi log', tool_use_id: 'u2' } as unknown as ToolCallInput)
+  reply = { result: { status: 'async_launched', taskId: 'w1', workflowName: 'Dựng video' }, text: 'ok' }
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'u3' } as unknown as ToolCallInput)
+  reply = { result: { stdout: 'x', stderr: '' }, text: 'ok' }
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u4' })
+  reply = { result: { backgroundTaskId: 'bad' }, text: 'lỗi', isError: true }
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u5' })
+  const list = snapshot().background!
+  expect(list.map(task => [task.taskId, task.kind, task.label, task.status])).toEqual([
+    ['b1', 'shell', 'Chạy test', 'running'], ['m1', 'monitor', 'Theo dõi log', 'running'], ['w1', 'workflow', 'Dựng video', 'running'],
+  ])
+  expect(snapshot().feed[0]?.kind).toBe('background')
+  expect(snapshot().feed[0]?.text).toBe('bắt đầu: Dựng video')
+})
+
+test('observer task ngầm giữ nguyên input, kết quả và không làm hỏng khi dữ liệu lạ', async ($, on) => {
+  setup(on)
+  const reply = bashResult('b1')
+  on('tool.call', (_, e) => { expect('command' in e ? e.command : '').toBe('npm test'); return reply })
+  on('prompt.submit', (_, e) => { expect(e.text).toBe('<task-notification>'); return { text: e.text } })
+  await start($)
+  expect(await $.tool.call({ tool: 'Bash', command: 'npm test', tool_use_id: 'u1' })).toEqual(reply)
+  await $.prompt.submit({ text: '<task-notification>', origin: { kind: 'task-notification' } } as never)
+})
+
+test('thông báo hoàn tất cập nhật đúng task, kể cả tìm theo tool-use-id', async ($, on) => {
+  const { snapshot } = setup(on)
+  on('tool.call', (_, e) => bashResult(e.tool_use_id === 'u1' ? 'b1' : 'b2'))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await start($)
+  await $.tool.call({ tool: 'Bash', command: 'a', tool_use_id: 'u1' })
+  await $.tool.call({ tool: 'Bash', command: 'b', tool_use_id: 'u2' })
+  const notice = (id: string, use: string, status: string) => '<task-notification>\n<task-id>' + id + '</task-id>\n<tool-use-id>' + use + '</tool-use-id>\n<status>' + status + '</status>\n<summary>PRIVATE_SUMMARY</summary>\n</task-notification>'
+  await $.prompt.submit({ text: notice('b1', 'x', 'failed'), origin: { kind: 'task-notification' } } as never)
+  await $.prompt.submit({ text: notice('zzz', 'u2', 'killed'), origin: { kind: 'task-notification' } } as never)
+  const list = snapshot().background!
+  expect(list.find(task => task.taskId === 'b1')?.status).toBe('failed')
+  expect(list.find(task => task.taskId === 'b2')?.status).toBe('killed')
+  expect(JSON.stringify(snapshot()).includes('PRIVATE_SUMMARY')).toBe(false)
+  await $.prompt.submit({ text: notice('b1', 'x', 'completed'), origin: { kind: 'composer' } } as never)
+  expect(snapshot().background!.find(task => task.taskId === 'b1')?.status).toBe('failed')
+  expect(parseTaskNotification('xin chào')).toBe(null)
+})
+
+test('đối chiếu cuối lượt: thêm task chưa biết, bỏ subagent, task biến mất là đã xong, lưu lịch', () => {
+  const state: MonitorState = { agents: [], limits: [], contextRemaining: null, feed: [], codex: null, background: [
+    { id: 'old', taskId: 'old', kind: 'shell', label: 'Cũ', status: 'running', startedAt: NOW - 120000, elapsed: '0h 2m' },
+    { id: 'keep', taskId: 'keep', kind: 'shell', label: 'Giữ', status: 'running', startedAt: NOW - 60000, elapsed: '0h 1m' },
+  ] }
+  reconcileBackground(state, [
+    { id: 'keep', type: 'shell', status: 'running', description: 'Giữ' },
+    { id: 'mcp1', type: 'MCP task', status: 'running', description: '', tool: 'ask', server: 's' },
+    { id: 'wf', type: 'workflow', status: 'pending', description: '', name: 'Dựng' },
+    { id: 'agent', type: 'subagent', status: 'running', description: 'Không được hiện', agent_type: 'Explore' } as never,
+  ], [{ id: 'c1', schedule: '0 9 * * *', recurring: true, prompt: 'p'.repeat(200) }], NOW)
+  expect(state.background!.find(task => task.taskId === 'old')?.status).toBe('done')
+  expect(state.background!.find(task => task.taskId === 'old')?.elapsed).toBe('0h 2m')
+  expect(state.background!.find(task => task.taskId === 'keep')?.status).toBe('running')
+  expect(state.background!.find(task => task.taskId === 'mcp1')?.kind).toBe('mcp')
+  expect(state.background!.find(task => task.taskId === 'mcp1')?.label).toBe('ask')
+  expect(state.background!.find(task => task.taskId === 'wf')?.label).toBe('Dựng')
+  expect(state.background!.some(task => task.taskId === 'agent')).toBe(false)
+  expect(state.scheduled).toEqual([{ id: 'c1', schedule: '0 9 * * *', recurring: true, prompt: 'p'.repeat(80) }])
+  const untouched = state.background!.map(task => task.status)
+  reconcileBackground(state, undefined, undefined, NOW + 1000)
+  expect(state.background!.map(task => task.status)).toEqual(untouched)
+  reconcileBackground(state, [], [], NOW + 1000)
+  expect(state.background!.every(task => task.status !== 'running')).toBe(true)
+  expect(state.scheduled).toEqual([])
+})
+
+test('classic.Stop cập nhật pane; desktop và terminal đều hiện task ngầm, lịch và trạng thái', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  on('classic.Stop', () => ({}))
+  on('tool.call', () => bashResult('b1'))
+  await start($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Chạy test', tool_use_id: 'u1' })
+  await clock.advance(120000)
+  expect(snapshot().background![0]?.elapsed).toBe('0h 2m')
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [
+    { id: 'b1', type: 'shell', status: 'running', description: 'Chạy test' }],
+    session_crons: [{ id: 'c1', schedule: '*/5 * * * *', recurring: true, prompt: 'Kiểm tra build' }] })
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: 'Task ngầm · 1' }))?.text).toBe('Task ngầm · 1')
+    expect((await ui.find({ type: 'Text', text: /Lệnh nền/ }))?.text).toBe('● Đang chạy · Lệnh nền · Chạy test · 0h 2m')
+    expect((await ui.find({ type: 'Text', text: 'Đã lên lịch · 1' }))?.text).toBe('Đã lên lịch · 1')
+    expect((await ui.find({ type: 'Text', text: /Lặp lại/ }))?.text).toBe('Lặp lại · */5 * * * * · Kiểm tra build')
+    await ui.unmount()
+  }
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [] })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: 'Task ngầm · 0' }))?.text).toBe('Task ngầm · 0')
+  const row = await ui.find({ type: 'Text', text: /Lệnh nền/ })
+  expect(row?.text).toBe('✓ Đã xong · Lệnh nền · Chạy test · 0h 2m')
+  expect(row?.props.dimColor).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^Đã lên lịch/ })).toBe(undefined)
+  await ui.unmount()
+})
+
+test('giới hạn lịch sử task ngầm và task đã xong quá 10 phút không còn hiện', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  let count = 0
+  on('classic.Stop', () => ({}))
+  on('tool.call', () => bashResult('b' + (++count)))
+  await start($)
+  await clock.settle()
+  for (let i = 0; i < 40; i++) await $.tool.call({ tool: 'Bash', command: 'x', tool_use_id: 'u' + i })
+  expect(snapshot().background!.length).toBe(32)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  expect(snapshot().background!.length).toBe(8)
+  await clock.advance(600000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Lệnh nền/ })).toBe(undefined)
+  expect((await ui.find({ type: 'Text', text: 'Không có task ngầm' }))?.text).toBe('Không có task ngầm')
   await ui.unmount()
 })

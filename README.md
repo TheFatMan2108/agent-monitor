@@ -27,8 +27,13 @@ Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi *
 - Các lần chạy Codex CLI do chính phiên này gọi (qua MCP hoặc `codex exec`): đang chạy hay đã xong, thư mục làm việc, công cụ gần nhất, số lần gọi, token.
 - Pane chỉ hiện việc của phiên đang mở. Limit vẫn là số của cả tài khoản.
 
+**Task ngầm**
+- Mục **Task ngầm** liệt kê lệnh chạy nền, monitor, workflow và MCP task: loại, mô tả, trạng thái, thời gian đã chạy. Task vừa xong vẫn hiện thêm 10 phút.
+- Mỗi task ngầm đang chạy là một robot đi tuần ở hành lang văn phòng, di chuột lên để xem tên. Màu robot theo loại task.
+- Mục **Đã lên lịch** hiện các `/loop` hoặc cron sẽ tự chạy lại trong phiên.
+
 **Tương tác**
-- Dòng thời gian mới nhất lên trước: Claude giao việc cho Codex, Codex trả kết quả (xong, lỗi, hết giờ chờ MCP), subagent được tạo, agent nhắn tin cho nhau, agent kết thúc.
+- Dòng thời gian mới nhất lên trước: Claude giao việc cho Codex, Codex trả kết quả (xong, lỗi, hết giờ chờ MCP), subagent được tạo, agent nhắn tin cho nhau, agent kết thúc, task ngầm bắt đầu và kết thúc.
 
 ## Cài đặt
 
@@ -57,7 +62,7 @@ Mod chỉ quan sát, không chặn hay sửa bất kỳ lệnh gọi nào. Mod k
 | Dữ liệu | Lấy từ |
 | --- | --- |
 | Limit và context của Claude | API của Claude Code (`$.session.usage`) |
-| Subagent, công cụ, tin nhắn | Sự kiện trong phiên Claude hiện tại |
+| Subagent, công cụ, tin nhắn, task ngầm, lịch | Sự kiện trong phiên Claude hiện tại |
 | Limit và tiến trình Codex | `~/.codex/sessions/**/rollout-*.jsonl` (hoặc `CODEX_HOME`) |
 
 - Không đọc `auth.json` hay `config.toml`.
@@ -67,6 +72,7 @@ Mod chỉ quan sát, không chặn hay sửa bất kỳ lệnh gọi nào. Mod k
 ## Hạn chế
 
 - Thanh chạy dưới mỗi agent chỉ báo agent đang hoạt động, không phải phần trăm tiến độ, vì các agent không báo số liệu này. Chi phí chỉ tính cho Claude.
+- Claude chỉ gửi danh sách task ngầm đầy đủ khi một lượt trả lời kết thúc. Mod theo dõi task từ lúc tạo và đối chiếu cuối mỗi lượt, nên task kết thúc giữa lượt có thể cập nhật trạng thái trễ một chút. Task ngầm không có phần trăm tiến độ.
 - Limit Codex chỉ cập nhật khi Codex thực sự gọi API. Sau giờ reset, pane báo đã reset thay vì giữ con số cũ.
 - Log Codex không ghi nó thuộc phiên Claude nào, nên mod ghép theo thời điểm gọi (từ 5 giây trước đến 90 giây sau) và thư mục làm việc. Hai phiên gọi Codex gần như cùng lúc mà không rõ thư mục có thể bị ghép nhầm. Codex chạy ngoài phiên, hoặc trước khi mod được nạp, sẽ không hiện.
 - Định dạng log của Codex không phải API công khai, nên có thể thay đổi theo phiên bản. Khi không đọc được, phần Codex sẽ ẩn hoặc báo chưa có dữ liệu, không ảnh hưởng phiên làm việc.
