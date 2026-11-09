@@ -1,4 +1,4 @@
-import type { BackgroundKind, CodexWindow, OfficeView, MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
+import type { BackgroundKind, CodexWindow, OfficeView, OfficeSize, MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
 
 export type { OfficeAgent, OfficeScene } from '../types'
 
@@ -381,6 +381,24 @@ function backgroundRobots(scene: OfficeScene): string {
 }
 
 const CANVAS = { w: 320, h: 210 }
+export const OFFICE_SIZE_LIMITS = { minWidth: 160, maxWidth: 1280, minHeight: 105, maxHeight: 840 } as const
+
+/** Kiểm tra dữ liệu ngoài, snap 8px rồi kẹp vào giới hạn khung. */
+export function sanitizeOfficeSize(value: unknown): OfficeSize | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const { w, h } = value as Record<string, unknown>
+  if (typeof w !== 'number' || !Number.isFinite(w) || typeof h !== 'number' || !Number.isFinite(h)) return null
+  return {
+    w: Math.max(OFFICE_SIZE_LIMITS.minWidth, Math.min(OFFICE_SIZE_LIMITS.maxWidth, Math.round(w / 8) * 8)),
+    h: Math.max(OFFICE_SIZE_LIMITS.minHeight, Math.min(OFFICE_SIZE_LIMITS.maxHeight, Math.round(h / 8) * 8)),
+  }
+}
+
+/** Cỡ người dùng chọn độc lập với zoom; mặc định giữ tỉ lệ khung nhìn. */
+export function officeFrame(view: OfficeView, size?: OfficeSize): OfficeSize {
+  return size ?? { w: 480, h: Math.round(480 * view.h / view.w) }
+}
+
 const MIN_VIEW_WIDTH = 80
 const ZOOM_STEP = 0.75
 export const FULL_VIEW: OfficeView = { x: 0, y: 0, w: CANVAS.w, h: CANVAS.h }
@@ -428,8 +446,8 @@ export function viewPercent(view: OfficeView): number {
   return Math.round(CANVAS.w / view.w * 100)
 }
 
-function draw(scene: OfficeScene, detail: boolean, view: OfficeView): string {
-  let art = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="' + Math.round(640 * view.h / view.w) + '" viewBox="' + view.x + ' ' + view.y + ' ' + view.w + ' ' + view.h + '" shape-rendering="crispEdges">'
+function draw(scene: OfficeScene, detail: boolean, view: OfficeView, frame?: OfficeSize): string {
+  let art = '<svg xmlns="http://www.w3.org/2000/svg" width="' + (frame?.w ?? 640) + '" height="' + (frame?.h ?? Math.round(640 * view.h / view.w)) + '" viewBox="' + view.x + ' ' + view.y + ' ' + view.w + ' ' + view.h + '" shape-rendering="crispEdges"' + (frame ? ' preserveAspectRatio="none"' : '') + '>'
   art += room(detail)
   const visible = scene.agents.filter(agent => agent.seat >= 0)
     .sort((a, b) => position(a).y - position(b).y || position(a).x - position(b).x)
@@ -463,10 +481,10 @@ function draw(scene: OfficeScene, detail: boolean, view: OfficeView): string {
 }
 
 /** SVG ổn định, có giới hạn; dữ liệu không tin cậy được escape và cắt trước khi vẽ. */
-export function renderOfficeSvg(scene: OfficeScene, view: OfficeView = FULL_VIEW): string {
-  const detailed = draw(scene, true, view)
+export function renderOfficeSvg(scene: OfficeScene, view: OfficeView = FULL_VIEW, frame?: OfficeSize): string {
+  const detailed = draw(scene, true, view, frame)
   if (detailed.length <= 131072) return detailed
-  const simple = draw(scene, false, view)
+  const simple = draw(scene, false, view, frame)
   if (simple.length <= 131072) return simple
   // SMELL: caller-created scenes can exceed capacity → bound them to valid, unique seats.
   const occupied = new Set<string>()
@@ -476,5 +494,5 @@ export function renderOfficeSvg(scene: OfficeScene, view: OfficeView = FULL_VIEW
     occupied.add(key)
     return true
   })
-  return draw({ ...scene, agents }, false, view)
+  return draw({ ...scene, agents }, false, view, frame)
 }

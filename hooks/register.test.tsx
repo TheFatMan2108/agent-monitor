@@ -1,9 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
+import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, EngineEventOf, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
 import type { CodexLaunch, MonitorState } from '../types'
 import { remaining, resetText, register, parseTaskNotification, reconcileBackground, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
-import { buildScene, renderOfficeSvg } from './office'
+import { FULL_VIEW, buildScene, officeFrame, renderOfficeSvg } from './office'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
 const PANE = {
@@ -122,6 +122,9 @@ test('terminal giữ layout chữ; desktop/vscode/mobile có văn phòng, avatar
       expect(avatars.every(svg => svg.props.isInteractive === undefined)).toBe(true)
       const bars = svgs.filter(svg => String(svg.props.alt).startsWith('Đang xử lý'))
       expect(bars.length).toBe(1)
+      expect(bars[0]?.props.width).toBe(240)
+      expect(bars[0]?.props.height).toBe(4)
+      expect((await ui.findAll({ type: 'Box' })).filter(box => box.props.marginTop === 1).length).toBe(1)
       expect(String(bars[0]?.props.source).includes('<animate ')).toBe(true)
       expect(svgs.every(svg => !String(svg.props.source).includes('%'))).toBe(true)
       expect((await ui.find({ type: 'Text', text: '≈$0.01' }))?.text).toBe('≈$0.01')
@@ -178,7 +181,7 @@ test('poll chỉ đổi SVG tại ranh giới tương tác, tick và rời sân 
   expect(String((await ui.find({ type: 'Svg' }))?.props.source).includes('>✓</text>')).toBe(false)
   await clock.advance(240000)
   expect(snapshot().officeSeats?.child).toBe(undefined)
-  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(renderOfficeSvg(buildScene(snapshot(), NOW + 315000)))
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(renderOfficeSvg(buildScene(snapshot(), NOW + 315000), FULL_VIEW, officeFrame(FULL_VIEW)))
   await ui.unmount()
 })
 
@@ -965,6 +968,9 @@ test('card desktop hiển thị limit đúng tài khoản, share token riêng v�
   seed(data)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const claudeLine = 'Limit Claude · 5 giờ [████████░░] 76% · Tuần [██████████] 96%'
+  const cardTexts = await ui.findAll({ type: 'Text' })
+  expect(cardTexts.some(text => text.text.includes('Claude Code · Claude Code'))).toBe(false)
+  expect(cardTexts.some(text => text.text.includes('Codex CLI · Codex CLI'))).toBe(false)
   for (const id of ['@main', 'child']) {
     const card = await ui.find({ key: `card:${id}` })
     expect(card?.text.includes(claudeLine)).toBe(true)
@@ -1329,10 +1335,190 @@ test('nút zoom đổi hình, hiện phần trăm, lưu lại và nút mũi tên
   await terminal.unmount()
 })
 
+test('kéo desktop snap hai trục, flush 100ms, lưu khi thả và nhận props mới ở lần kéo sau', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  const saved: unknown[] = []
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', (_, e) => { saved.push({ key: e.key, value: e.value }); return { value: undefined } })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'office-resize', type: 'Client' })).toBeDefined()
+  expect(await ui.find({ key: 'office:wider' })).toBe(undefined)
+  expect((await ui.find({ type: 'Svg' }))?.props.width).toBe(480)
+  expect((await ui.find({ type: 'Svg' }))?.props.height).toBe(315)
+  const initialOrder = await ui.findAll({})
+  const handleIndex = initialOrder.findIndex(element => element.key === 'office-resize')
+  expect(initialOrder[handleIndex + 1]?.type).toBe('Svg')
+  await ui.pointer({ type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'right' })
+  await ui.pointer({ type: 'move', x: 18, y: 3, button: 'right' })
+  await ui.advance(100)
+  expect(snapshot().officeSize).toBe(undefined)
+  await ui.pointer({ type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'left' })
+  await ui.pointer({ type: 'move', x: 18, y: 3, fine: { x: 18.25, y: 3.25 }, button: 'left' })
+  expect((await ui.find({ type: 'Text', text: /ngang đổi rộng/, in: 'office-resize' }))?.text.endsWith('544×352')).toBe(true)
+  await ui.advance(99)
+  expect(snapshot().officeSize).toBe(undefined)
+  await ui.advance(1)
+  expect(snapshot().officeSize).toEqual({ w: 544, h: 352 })
+  expect(saved).toEqual([])
+  expect((await ui.find({ type: 'Svg' }))?.props.width).toBe(544)
+  expect((await ui.find({ type: 'Svg' }))?.props.height).toBe(352)
+  const resizedOrder = await ui.findAll({})
+  expect(resizedOrder.findIndex(element => element.key === 'office-resize')).toBe(handleIndex)
+  expect(resizedOrder[handleIndex + 1]?.type).toBe('Svg')
+  await ui.pointer({ type: 'move', x: 26, y: 5, fine: { x: 26.25, y: 5.25 }, button: 'left' })
+  await ui.pointer({ type: 'up', x: 26, y: 5, button: 'left' })
+  expect(snapshot().officeSize).toEqual({ w: 608, h: 384 })
+  expect(saved).toEqual([{ key: 'officeSize', value: { w: 608, h: 384 } }])
+  expect((await ui.find({ type: 'Svg' }))?.props.source.includes('width="608" height="384"')).toBe(true)
+  await ui.advance(100)
+  expect(saved.length).toBe(1)
+  await ui.pointer({ type: 'down', x: 0, y: 0, button: 'left' })
+  await ui.pointer({ type: 'move', x: 1, y: 0, button: 'left' })
+  await ui.pointer({ type: 'move', x: 2, y: 0 }) // Nhả ngoài vùng, không áp dụng tọa độ hover.
+  expect(snapshot().officeSize).toEqual({ w: 616, h: 384 })
+  expect(saved.length).toBe(2)
+  await ui.pointer({ type: 'move', x: 20, y: 20, button: 'left' })
+  await ui.advance(200)
+  expect(snapshot().officeSize).toEqual({ w: 616, h: 384 })
+  await ui.unmount()
+})
+
+test('message không tin cậy không đổi state; chỉ done true mới lưu cỡ đã sanitize', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  const saved: unknown[] = []
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', (_, e) => { saved.push(e.value); return { value: undefined } })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const before = structuredClone(snapshot())
+  for (const data of [null, false, [], 'resize', {}, { type: 'other', w: 640, h: 320 },
+    { type: 'resize', w: '640', h: 320 }, { type: 'resize', w: 640 }]) await ui.post(data)
+  expect(snapshot()).toEqual(before)
+  expect(saved).toEqual([])
+  await ui.post({ type: 'resize', w: 641, h: 319, done: 'true' })
+  expect(snapshot().officeSize).toEqual({ w: 640, h: 320 })
+  expect(saved).toEqual([])
+  await ui.post({ type: 'resize', w: 5000, h: 0, done: true })
+  expect(snapshot().officeSize).toEqual({ w: 1280, h: 105 })
+  expect(saved).toEqual([{ w: 1280, h: 105 }])
+  await ui.unmount()
+})
+
+test('vscode/mobile có nút đổi cỡ, lưu store và Cỡ gốc xóa cỡ đã lưu', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  const saved: unknown[] = []
+  const deleted: string[] = []
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', (_, e) => { saved.push({ key: e.key, value: e.value }); return { value: undefined } })
+  on('store.delete', (_, e) => { deleted.push(e.key); return { value: undefined } })
+  await start($)
+  await clock.settle()
+  for (const surface of ['vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.findAll({ type: 'Client' })).length).toBe(0)
+    expect(await ui.find({ key: 'office:size-reset' })).toBe(undefined)
+    for (const [key, label] of [['narrower', 'Hẹp'], ['wider', 'Rộng'], ['shorter', 'Thấp'], ['taller', 'Cao']]) {
+      expect((await ui.find({ key: `office:${key}` }))?.props.label).toBe(label)
+    }
+    await ui.press({ key: 'office:wider' })
+    expect(snapshot().officeSize).toEqual({ w: 544, h: 312 })
+    await ui.press({ key: 'office:narrower' })
+    expect(snapshot().officeSize).toEqual({ w: 480, h: 312 })
+    await ui.press({ key: 'office:shorter' })
+    expect(snapshot().officeSize).toEqual({ w: 480, h: 272 })
+    await ui.press({ key: 'office:taller' })
+    expect(snapshot().officeSize).toEqual({ w: 480, h: 312 })
+    expect((await ui.find({ type: 'Svg' }))?.props.height).toBe(312)
+    await ui.press({ key: 'office:size-reset' })
+    expect(snapshot().officeSize).toBe(undefined)
+    expect((await ui.find({ type: 'Svg' }))?.props.height).toBe(315)
+    expect(await ui.find({ key: 'office:size-reset' })).toBe(undefined)
+    await ui.unmount()
+  }
+  expect(saved.length).toBe(8)
+  expect(saved[0]).toEqual({ key: 'officeSize', value: { w: 544, h: 312 } })
+  expect(deleted).toEqual(['officeSize', 'officeSize'])
+})
+
+test('ui.fault đúng Client chuyển desktop sang nút dự phòng', async ($, on) => {
+  const { clock, snapshot, seed } = setup(on)
+  // Kit không cung cấp $.ui.fault; gọi hook đã đăng ký với state CAS giả rồi redraw pane.
+  type Fault = EngineEventOf['ui.fault']
+  type FaultHook = ($: CoreEngineInterface, e: Fault, next: (e: Fault) => Promise<{}>) => Promise<unknown>
+  let faultHook: FaultHook | undefined
+  register(((event: string, matcher: unknown, handler: unknown) => {
+    if (event !== 'ui.fault') return
+    expect(matcher).toEqual({ component: 'Pane', requestId: 'agent-monitor' })
+    faultHook = handler as FaultHook
+  }) as unknown as On, {} as Parameters<Register>[1])
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  let faultState = structuredClone(snapshot())
+  let version = 0
+  const api = {
+    clock: { now: async () => NOW },
+    state: {
+      get: async () => ({ value: { shape: 'monitor-7', value: faultState }, version }),
+      set: async (_: unknown, value: { value: MonitorState }, options: { ifVersion: number }) => {
+        expect(options.ifVersion).toBe(version)
+        faultState = value.value
+        version++
+        seed(faultState)
+        return { isSet: true }
+      },
+    },
+  } as unknown as CoreEngineInterface
+  const dispatchFault = async (element: string) => {
+    const fault: Fault = { surface: 'desktop', component: 'Pane', requestId: 'agent-monitor',
+      module: 'hooks/office-resize.tsx', phase: 'run', reason: 'module failed', element }
+    let continued = false
+    expect(await faultHook!(api, fault, async received => {
+      expect(received).toBe(fault)
+      continued = true
+      return {}
+    })).toEqual({})
+    expect(continued).toBe(true)
+    await ui.redraw()
+  }
+  await dispatchFault('other')
+  expect(faultState.officeDragFailed).toBe(undefined)
+  expect(await ui.find({ key: 'office-resize' })).toBeDefined()
+  await dispatchFault('office-resize')
+  expect(faultState.officeDragFailed).toBe(true)
+  expect(await ui.find({ key: 'office-resize' })).toBe(undefined)
+  for (const key of ['narrower', 'wider', 'shorter', 'taller']) expect(await ui.find({ key: `office:${key}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('cỡ đã lưu được tải ở session.start; dữ liệu hỏng không ghi đè', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  let stored: unknown = { w: 701, h: 399 }
+  on('store.get', (_, e) => ({ value: e.key === 'officeSize' ? stored : undefined }))
+  on('store.delete', () => { stored = undefined; return { value: undefined } })
+  await start($)
+  await clock.settle()
+  expect(snapshot().officeSize).toEqual({ w: 704, h: 400 })
+  stored = { w: 'bad', h: 320 }
+  await start($)
+  await clock.settle()
+  expect(snapshot().officeSize).toEqual({ w: 704, h: 400 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'office:size-reset' })
+  expect(snapshot().officeSize).toBe(undefined)
+  await start($)
+  await clock.settle()
+  expect(snapshot().officeSize).toBe(undefined)
+  await ui.unmount()
+})
+
 test('mức zoom đã lưu được dùng lại ở phiên sau, giá trị hỏng thì bỏ qua', async ($, on) => {
   const { clock, snapshot } = setup(on)
   let stored: unknown = { x: 40, y: 30, w: 160, h: 105 }
-  on('store.get', () => ({ value: stored }))
+  on('store.get', (_, e) => ({ value: e.key === 'officeView' ? stored : undefined }))
   await start($)
   await clock.settle()
   expect(snapshot().officeView).toEqual({ x: 40, y: 30, w: 160, h: 105 })

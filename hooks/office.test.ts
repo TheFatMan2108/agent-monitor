@@ -1,8 +1,46 @@
 import { expect, test } from 'claude-code/testing'
 import type { AgentRow, MonitorState, OfficeKind, OfficeScene } from '../types'
-import { FULL_VIEW, buildScene, moveView, renderAvatarSvg, renderOfficeSvg, sanitizeView, viewPercent } from './office'
+import { FULL_VIEW, OFFICE_SIZE_LIMITS, buildScene, moveView, officeFrame, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
 
 const NOW = 1804734000000
+
+test('cỡ văn phòng chỉ nhận số hữu hạn, snap 8px rồi kẹp giới hạn', () => {
+  for (const value of [null, undefined, false, 42, '480', [], {}, { w: 480 }, { w: '480', h: 320 },
+    { w: 480, h: NaN }, { w: Infinity, h: 320 }, { w: 480, h: -Infinity }]) {
+    expect(sanitizeOfficeSize(value)).toBe(null)
+  }
+  expect(OFFICE_SIZE_LIMITS).toEqual({ minWidth: 160, maxWidth: 1280, minHeight: 105, maxHeight: 840 })
+  expect(sanitizeOfficeSize({ w: -100, h: 0 })).toEqual({ w: 160, h: 105 })
+  expect(sanitizeOfficeSize({ w: 2000, h: 900 })).toEqual({ w: 1280, h: 840 })
+  expect(sanitizeOfficeSize({ w: 483.9, h: 316 })).toEqual({ w: 480, h: 320 })
+  expect(sanitizeOfficeSize({ w: 484, h: 315.9 })).toEqual({ w: 488, h: 312 })
+  expect(sanitizeOfficeSize({ w: Number.MAX_VALUE, h: -Number.MAX_VALUE })).toEqual({ w: 1280, h: 105 })
+})
+
+test('khung mặc định rộng 480 theo tỉ lệ view, cỡ riêng độc lập với zoom', () => {
+  expect(officeFrame(FULL_VIEW)).toEqual({ w: 480, h: 315 })
+  const view = { x: 213, y: 40, w: 104, h: 167 }
+  expect(officeFrame(view)).toEqual({ w: 480, h: 771 })
+  const size = { w: 640, h: 256 }
+  expect(officeFrame(view, size)).toEqual(size)
+  expect(officeFrame(FULL_VIEW, size)).toEqual(size)
+})
+
+test('SVG dùng cỡ khung và kéo dãn hai trục; không truyền khung giữ markup cũ', () => {
+  const scene = buildScene(state(), NOW)
+  const frame = { w: 704, h: 248 }
+  const svg = renderOfficeSvg(scene, FULL_VIEW, frame)
+  expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="704" height="248"')).toBe(true)
+  expect(svg.includes('preserveAspectRatio="none"')).toBe(true)
+  const original = renderOfficeSvg(scene)
+  expect(original.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420"')).toBe(true)
+  expect(original.includes('preserveAspectRatio')).toBe(false)
+  const oversized = { ...scene, agents: Array.from({ length: 80 }, (_, i) => ({ ...scene.agents[0]!, id: `a${i}` })) }
+  const bounded = renderOfficeSvg(oversized, FULL_VIEW, frame)
+  expect(bounded.length <= 131072).toBe(true)
+  expect(bounded.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="704" height="248"')).toBe(true)
+  expect(bounded.includes('preserveAspectRatio="none"')).toBe(true)
+})
 
 function row(id: string, status: AgentRow['status'] = 'running', startedAt = NOW - 10000): AgentRow {
   return { id, name: id, description: 'Kiểm tra mã', status, startedAt,

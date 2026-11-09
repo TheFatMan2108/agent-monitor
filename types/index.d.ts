@@ -82,10 +82,13 @@ export type MonitorState = {
   claudeCost?: number | null
   officeSeats?: Record<string, OfficeSeat>
   officeView?: OfficeView
+  officeSize?: OfficeSize
+  officeDragFailed?: boolean
   officePhase?: string
 }
 
 export type OfficeView = { x: number; y: number; w: number; h: number }
+export type OfficeSize = { w: number; h: number }
 export type OfficeZone = 'work' | 'lounge'
 export type OfficeKind = 'main' | 'subagent' | 'codex'
 export type OfficeStatus = AgentRow['status'] | 'stopped'

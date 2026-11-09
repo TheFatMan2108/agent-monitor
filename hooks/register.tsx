@@ -1,10 +1,10 @@
 import { atom, read } from 'claude-code'
 import type {
-  AgentInfo, AgentStatus, CoreEngineInterface, Register, SessionContextUsage,
+  AgentInfo, AgentStatus, CoreEngineInterface, ElementTable, Register, SessionContextUsage,
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
 import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
-import { FULL_VIEW, OFFICE_ACTIONS, buildScene, moveView, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeView, viewPercent } from './office'
+import { FULL_VIEW, OFFICE_ACTIONS, buildScene, moveView, officeFrame, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
 import type { OfficeAction } from './office'
 
 export { remaining } from './office'
@@ -19,6 +19,7 @@ const INITIAL: MonitorState = {
 }
 const monitor = atom(REF, INITIAL, { shape: SHAPE })
 const VIEW_KEY = 'officeView'
+const SIZE_KEY = 'officeSize'
 const NO_CODEX_RUNS = 'Chưa có lần gọi Codex trong phiên này'
 const EMPTY_LIMITS = 'Chưa có dữ liệu limit (cần gói subscription và ít nhất một lượt gọi API)'
 const MAX_HISTORY = 200
@@ -772,6 +773,10 @@ export const register: Register = (on, options) => {
       const saved = sanitizeView(await $.store.get(VIEW_KEY))
       if (saved) await change($, state => { state.officeView = saved })
     })
+    await safely(async () => {
+      const saved = sanitizeOfficeSize(await $.store.get(SIZE_KEY))
+      if (saved) await change($, state => { state.officeSize = saved })
+    })
     void $.ui.open({ id: PANE, title: 'Theo dõi agent' }).catch(() => {})
     tick?.cancel()
     runtime.lastUsage = runtime.lastCodex = -Infinity
@@ -960,6 +965,24 @@ export const register: Register = (on, options) => {
     return await next(e)
   })
 
+  on('ui.message', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    await safely(async () => {
+      if (e.element !== 'office-resize' || e.data === null || typeof e.data !== 'object') return
+      const data = e.data as Record<string, unknown>
+      if (data.type !== 'resize') return
+      const size = sanitizeOfficeSize(data)
+      if (!size) return
+      await change($, state => { state.officeSize = size })
+      if (data.done === true) await $.store.set(SIZE_KEY, size)
+    })
+    return await next(e)
+  })
+
+  on('ui.fault', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.element === 'office-resize') await safely(() => change($, state => { state.officeDragFailed = true }))
+    return await next(e)
+  })
+
   on('ui.press', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     const action = e.plugin === PANE && e.element.startsWith('office:') ? e.element.slice(7) : ''
     if ((OFFICE_ACTIONS as readonly string[]).includes(action)) {
@@ -970,6 +993,25 @@ export const register: Register = (on, options) => {
           state.officeView = view
         })
         if (view) await $.store.set(VIEW_KEY, view)
+      })
+    }
+    if (action === 'size-reset') {
+      await safely(async () => {
+        await change($, state => { delete state.officeSize })
+        await $.store.delete(SIZE_KEY)
+      })
+    } else if (['narrower', 'wider', 'shorter', 'taller'].includes(action)) {
+      await safely(async () => {
+        let size: ReturnType<typeof sanitizeOfficeSize> = null
+        await change($, state => {
+          const frame = officeFrame(state.officeView ?? FULL_VIEW, state.officeSize)
+          size = sanitizeOfficeSize({
+            w: frame.w + (action === 'narrower' ? -64 : action === 'wider' ? 64 : 0),
+            h: frame.h + (action === 'shorter' ? -40 : action === 'taller' ? 40 : 0),
+          })
+          if (size) state.officeSize = size
+        })
+        if (size) await $.store.set(SIZE_KEY, size)
       })
     }
     if (e.plugin === PANE && (e.element === 'main' || e.element.startsWith('view:'))) {
@@ -988,6 +1030,7 @@ export const register: Register = (on, options) => {
     const Svg = 'Svg' in elements && elements.Svg({ source: '<svg/>', alt: '' }).type === 'Svg'
       ? elements.Svg : undefined
     const state = await read($, monitor)
+    const Client = e.surface === 'desktop' && !state.officeDragFailed ? (elements as ElementTable<'desktop'>).Client : undefined
     const now = await $.clock.now()
     const agents = orderedAgents(state.agents)
     const backgroundRunning = (state.background ?? []).filter(task => task.status === 'running')
@@ -1002,6 +1045,7 @@ export const register: Register = (on, options) => {
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
     const scene = Svg ? buildScene(state, now) : undefined
     const view = state.officeView ?? FULL_VIEW
+    const frame = officeFrame(view, state.officeSize)
     const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
     const resting = scene?.agents.filter(agent => agent.zone === 'lounge') ?? []
     const main = state.agents.find(agent => agent.id === MAIN)
@@ -1011,6 +1055,7 @@ export const register: Register = (on, options) => {
     const cards = (rows: NonNullable<typeof scene>['agents'], small: boolean) => rows.map(agent => {
       const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
         : 'Agent con Claude'
+      const name = agent.name === type ? '' : ` · ${agent.name}`
       const status = agent.status === 'stopped' ? CODEX_STATUS.stopped : STATUS[agent.status]
       const detail = `${agent.tool} · ${agent.tools}${agent.partial ? '+' : ''} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
       const { fiveHourLeft, weekLeft, binding, share, account } = agent.limit
@@ -1024,14 +1069,14 @@ export const register: Register = (on, options) => {
       return <Box key={`card:${agent.id}`} flexDirection="row" gap={1} padding={1} borderStyle="round" borderColor="subtle">
         {Svg && <Svg source={renderAvatarSvg(agent.lookSeed, agent.kind)} alt={`Chân dung ${agent.name}`} width={36} height={36} />}
         <Box flexDirection="column" flexGrow={1}>
-          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text> · {agent.name} · {agent.task} · {status} · {detail}<Text color={limitColor}> · {limitDetail}</Text></Text>
+          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text>{name} · {agent.task} · {status} · {detail}<Text color={limitColor}> · {limitDetail}</Text></Text>
             : <>
               <Text bold>{agent.task}</Text>
-              <Text color={agent.kind === 'codex' ? 'success' : agent.kind === 'main' ? 'claude' : 'suggestion'}>{type} · {agent.name}{agent.model ? ` · ${agent.model}` : ''} · {status}</Text>
+              <Text color={agent.kind === 'codex' ? 'success' : agent.kind === 'main' ? 'claude' : 'suggestion'}>{type}{name}{agent.model ? ` · ${agent.model}` : ''} · {status}</Text>
               <Text dimColor>{detail}</Text>
               <Text color={limitColor}>Limit {account === 'codex' ? 'Codex' : 'Claude'} · {limitDetail}</Text>
               {share !== null && <Text dimColor>Agent này chiếm {share}% token của tài khoản trong các agent đang theo dõi</Text>}
-              {Svg && agent.status === 'running' && <Svg source={activityBar} alt="Đang xử lý, chưa có số liệu tiến độ" height={4} />}
+              {Svg && agent.status === 'running' && <Box marginTop={1}><Svg source={activityBar} alt="Đang xử lý, chưa có số liệu tiến độ" width={240} height={4} /></Box>}
             </>}
         </Box>
         {agent.kind === 'subagent' && <Button key={`view:${agent.id}`} label="Xem" onPress={() => {}} />}
@@ -1048,6 +1093,12 @@ export const register: Register = (on, options) => {
             <Button key="office:all" label="Toàn cảnh" onPress={() => {}} />
             <Button key="office:work" label="Làm việc" onPress={() => {}} />
             <Button key="office:lounge" label="Nghỉ" onPress={() => {}} />
+            {!Client && <>
+              <Button key="office:narrower" label="Hẹp" onPress={() => {}} />
+              <Button key="office:wider" label="Rộng" onPress={() => {}} />
+              <Button key="office:shorter" label="Thấp" onPress={() => {}} />
+              <Button key="office:taller" label="Cao" onPress={() => {}} />
+            </>}
           </Box>
           {view.w < 320 || view.h < 210 ? <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Button key="office:left" label="◀" onPress={() => {}} />
@@ -1055,7 +1106,9 @@ export const register: Register = (on, options) => {
             <Button key="office:down" label="▼" onPress={() => {}} />
             <Button key="office:right" label="▶" onPress={() => {}} />
           </Box> : null}
-          <Svg source={renderOfficeSvg(scene, view)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} isInteractive />
+          {Client && <Client key="office-resize" module="./office-resize.tsx" props={{ width: frame.w, height: frame.h }} width="100%" />}
+          <Svg source={renderOfficeSvg(scene, view, frame)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} width={frame.w} height={frame.h} isInteractive />
+          {state.officeSize && <Box flexDirection="row"><Button key="office:size-reset" label="Cỡ gốc" onPress={() => {}} /></Box>}
           <Box flexDirection="row" gap={1}>
             <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
               <Text dimColor>Chi phí Claude</Text>
