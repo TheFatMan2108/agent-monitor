@@ -4,7 +4,8 @@ import type {
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
 import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
-import { buildScene, remaining, renderAvatarSvg, renderOfficeSvg } from './office'
+import { FULL_VIEW, OFFICE_ACTIONS, buildScene, moveView, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeView, viewPercent } from './office'
+import type { OfficeAction } from './office'
 
 export { remaining } from './office'
 
@@ -17,6 +18,7 @@ const INITIAL: MonitorState = {
   agents: [], limits: [], contextRemaining: null, feed: [], codex: null,
 }
 const monitor = atom(REF, INITIAL, { shape: SHAPE })
+const VIEW_KEY = 'officeView'
 const NO_CODEX_RUNS = 'Chưa có lần gọi Codex trong phiên này'
 const EMPTY_LIMITS = 'Chưa có dữ liệu limit (cần gói subscription và ít nhất một lượt gọi API)'
 const MAX_HISTORY = 200
@@ -766,6 +768,10 @@ export const register: Register = (on, options) => {
     await safely(async () => {
       await $.command.register({ name: PANE, description: 'Mở bảng theo dõi hạn mức và agent' })
     })
+    await safely(async () => {
+      const saved = sanitizeView(await $.store.get(VIEW_KEY))
+      if (saved) await change($, state => { state.officeView = saved })
+    })
     void $.ui.open({ id: PANE, title: 'Theo dõi agent' }).catch(() => {})
     tick?.cancel()
     runtime.lastUsage = runtime.lastCodex = -Infinity
@@ -955,6 +961,17 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.press', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const action = e.plugin === PANE && e.element.startsWith('office:') ? e.element.slice(7) : ''
+    if ((OFFICE_ACTIONS as readonly string[]).includes(action)) {
+      await safely(async () => {
+        let view: ReturnType<typeof moveView> | undefined
+        await change($, state => {
+          view = moveView(state.officeView ?? FULL_VIEW, action as OfficeAction)
+          state.officeView = view
+        })
+        if (view) await $.store.set(VIEW_KEY, view)
+      })
+    }
     if (e.plugin === PANE && (e.element === 'main' || e.element.startsWith('view:'))) {
       await safely(async () => {
         const result = await $.ui.view(e.element === 'main' ? {} : { agentId: e.element.slice(5) })
@@ -984,6 +1001,7 @@ export const register: Register = (on, options) => {
       + (e.props.view.agentId ? 1 : 0) + 1 + Math.max(1, backgroundShown.length) + (scheduled.length ? 1 + scheduled.length : 0)
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
     const scene = Svg ? buildScene(state, now) : undefined
+    const view = state.officeView ?? FULL_VIEW
     const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
     const resting = scene?.agents.filter(agent => agent.zone === 'lounge') ?? []
     const main = state.agents.find(agent => agent.id === MAIN)
@@ -1023,7 +1041,21 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {Svg && scene && <>
           <Text bold size="heading">Văn phòng Agent</Text>
-          <Svg source={renderOfficeSvg(scene)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} isInteractive />
+          <Box flexDirection="row" gap={1} flexWrap="wrap">
+            <Button key="office:out" label="−" onPress={() => {}} />
+            <Text>{viewPercent(view)}%</Text>
+            <Button key="office:in" label="+" onPress={() => {}} />
+            <Button key="office:all" label="Toàn cảnh" onPress={() => {}} />
+            <Button key="office:work" label="Làm việc" onPress={() => {}} />
+            <Button key="office:lounge" label="Nghỉ" onPress={() => {}} />
+          </Box>
+          {view.w < 320 || view.h < 210 ? <Box flexDirection="row" gap={1} flexWrap="wrap">
+            <Button key="office:left" label="◀" onPress={() => {}} />
+            <Button key="office:up" label="▲" onPress={() => {}} />
+            <Button key="office:down" label="▼" onPress={() => {}} />
+            <Button key="office:right" label="▶" onPress={() => {}} />
+          </Box> : null}
+          <Svg source={renderOfficeSvg(scene, view)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} isInteractive />
           <Box flexDirection="row" gap={1}>
             <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
               <Text dimColor>Chi phí Claude</Text>

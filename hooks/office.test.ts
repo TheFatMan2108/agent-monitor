@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import type { AgentRow, MonitorState, OfficeKind, OfficeScene } from '../types'
-import { buildScene, renderAvatarSvg, renderOfficeSvg } from './office'
+import { FULL_VIEW, buildScene, moveView, renderAvatarSvg, renderOfficeSvg, sanitizeView, viewPercent } from './office'
 
 const NOW = 1804734000000
 
@@ -425,4 +425,48 @@ test('mỗi task ngầm đang chạy là một robot; tối đa 6, phần dư hi
   expect(new Set(many.match(/<[a-zA-Z]+/g)).has('<use')).toBe(false)
   expect(buildScene(state(), NOW).background).toEqual([])
   expect(renderOfficeSvg(buildScene(state(), NOW)).includes('background-task')).toBe(false)
+})
+
+
+test('nút zoom phóng quanh tâm, dừng ở 400%, thu về toàn cảnh; di chuyển không ra ngoài canvas', () => {
+  let view = FULL_VIEW
+  const widths: number[] = []
+  for (let i = 0; i < 7; i++) { view = moveView(view, 'in'); widths.push(view.w) }
+  expect(widths).toEqual([240, 180, 135, 101, 80, 80, 80])
+  expect(viewPercent(view)).toBe(400)
+  expect(Math.abs(view.x + view.w / 2 - 160) <= 1).toBe(true)
+  for (let i = 0; i < 6; i++) view = moveView(view, 'out')
+  expect(view).toEqual(FULL_VIEW)
+  expect(moveView(FULL_VIEW, 'out')).toEqual(FULL_VIEW)
+  let pan = moveView(FULL_VIEW, 'in')
+  const start = pan
+  for (let i = 0; i < 9; i++) pan = moveView(pan, 'left')
+  expect(pan.x).toBe(0)
+  for (let i = 0; i < 9; i++) pan = moveView(pan, 'up')
+  expect(pan.y).toBe(0)
+  for (let i = 0; i < 9; i++) pan = moveView(pan, 'right')
+  expect(pan.x + pan.w).toBe(320)
+  for (let i = 0; i < 9; i++) pan = moveView(pan, 'down')
+  expect(pan.y + pan.h).toBe(210)
+  expect([pan.w, pan.h]).toEqual([start.w, start.h])
+  expect(moveView(FULL_VIEW, 'left')).toEqual(FULL_VIEW)
+  expect(moveView(FULL_VIEW, 'work').w).toBe(208)
+  expect(moveView(FULL_VIEW, 'lounge').x).toBe(213)
+  expect(moveView(moveView(FULL_VIEW, 'lounge'), 'all')).toEqual(FULL_VIEW)
+  expect(moveView(moveView(FULL_VIEW, 'lounge'), 'out')).toEqual(FULL_VIEW)
+})
+
+test('khung nhìn đổi viewBox, giữ tỉ lệ; toàn cảnh không đổi so với mặc định; giá trị lưu hỏng bị bỏ', () => {
+  const scene = buildScene(state([row('a')]), NOW)
+  const full = renderOfficeSvg(scene)
+  expect(full.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 320 210"')).toBe(true)
+  expect(renderOfficeSvg(scene, FULL_VIEW)).toBe(full)
+  const zoomed = renderOfficeSvg(scene, { x: 40, y: 30, w: 160, h: 105 })
+  expect(zoomed.includes('width="640" height="420" viewBox="40 30 160 105"')).toBe(true)
+  expect(renderOfficeSvg(scene, { x: 213, y: 40, w: 104, h: 167 }).includes('height="1028" viewBox="213 40 104 167"')).toBe(true)
+  expect(sanitizeView({ x: 40, y: 30, w: 160, h: 105 })).toEqual({ x: 40, y: 30, w: 160, h: 105 })
+  expect(sanitizeView({ x: 300, y: 200, w: 160, h: 105 })).toEqual({ x: 160, y: 105, w: 160, h: 105 })
+  for (const bad of [null, 1, 'x', {}, { x: 0, y: 0, w: 10, h: 10 }, { x: 0, y: 0, w: 900, h: 90 }, { x: 0.5, y: 0, w: 100, h: 90 }, { x: '0', y: 0, w: 100, h: 90 }]) {
+    expect(sanitizeView(bad)).toBe(null)
+  }
 })

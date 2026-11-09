@@ -1299,3 +1299,48 @@ test('giới hạn lịch sử task ngầm và task đã xong quá 10 phút khô
   expect((await ui.find({ type: 'Text', text: 'Không có task ngầm' }))?.text).toBe('Không có task ngầm')
   await ui.unmount()
 })
+
+
+test('nút zoom đổi hình, hiện phần trăm, lưu lại và nút mũi tên chỉ hiện khi phóng to', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  const saved: unknown[] = []
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', (_, e) => { saved.push(e.value); return { value: undefined } })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: '100%' }))?.text).toBe('100%')
+  expect(await ui.find({ key: 'office:left' })).toBe(undefined)
+  await ui.press({ key: 'office:in' })
+  expect(snapshot().officeView).toEqual({ x: 40, y: 26, w: 240, h: 158 })
+  expect(saved).toEqual([{ x: 40, y: 26, w: 240, h: 158 }])
+  expect((await ui.find({ type: 'Text', text: '133%' }))?.text).toBe('133%')
+  expect((await ui.find({ type: 'Svg', key: undefined as never }))?.props.source.includes('viewBox="40 26 240 158"')).toBe(true)
+  await ui.press({ key: 'office:left' })
+  expect(snapshot().officeView?.x).toBe(0)
+  await ui.press({ key: 'office:lounge' })
+  expect(snapshot().officeView).toEqual({ x: 213, y: 40, w: 104, h: 167 })
+  await ui.press({ key: 'office:all' })
+  expect(snapshot().officeView).toEqual({ x: 0, y: 0, w: 320, h: 210 })
+  expect(await ui.find({ key: 'office:right' })).toBe(undefined)
+  await ui.unmount()
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await terminal.find({ key: 'office:in' })).toBe(undefined)
+  await terminal.unmount()
+})
+
+test('mức zoom đã lưu được dùng lại ở phiên sau, giá trị hỏng thì bỏ qua', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  let stored: unknown = { x: 40, y: 30, w: 160, h: 105 }
+  on('store.get', () => ({ value: stored }))
+  await start($)
+  await clock.settle()
+  expect(snapshot().officeView).toEqual({ x: 40, y: 30, w: 160, h: 105 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: '200%' }))?.text).toBe('200%')
+  await ui.unmount()
+  stored = { x: 'hỏng' }
+  await start($)
+  await clock.settle()
+  expect(snapshot().officeView).toEqual({ x: 40, y: 30, w: 160, h: 105 })
+})

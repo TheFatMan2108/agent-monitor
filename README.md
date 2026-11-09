@@ -12,6 +12,7 @@ Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi *
 - Mỗi agent là một nhân vật có ngoại hình cố định. Claude Code mặc áo khoác đất nung, Codex CLI mặc hoodie tối, subagent đeo thẻ.
 - Đang chạy thì ngồi gõ phím ở bàn, cần bạn thì giơ tay với dấu `?`, lỗi thì hiện `!`, xong việc thì ra khu nghỉ.
 - Thư bay giữa các nhân vật khi chúng giao việc hoặc nhắn nhau. Di chuột lên nhân vật để xem tên và việc đang làm.
+- Nút **−** và **+** phóng to đến 400%, nút **Toàn cảnh**, **Làm việc**, **Nghỉ** nhảy tới từng khu, nút mũi tên di chuyển khung nhìn khi đang phóng to. Mức zoom được ghi nhớ cho các phiên sau.
 - Bên dưới là thẻ tổng chi phí Claude, token, thời gian, và thẻ riêng cho từng agent.
 - Trên terminal không vẽ được SVG, nên pane hiển thị dạng chữ.
 

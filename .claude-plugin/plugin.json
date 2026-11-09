@@ -1,6 +1,6 @@
 {
   "name": "agent-monitor",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Pane theo dõi limit, tiến độ và tương tác của Claude Code và Codex CLI.",
   "types": "./types/index.d.ts"
 }
