@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
 import type { MonitorState } from '../types'
 import { otherSessions, remaining, resetText, taskPids, register, parseCodexRollout, codexWindowText, codexStatus, readCodex } from './register'
+import { buildScene, renderOfficeSvg } from './office'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
 const PANE = {
@@ -86,6 +87,93 @@ test('hiển thị thông báo limit trống trên mọi surface', async ($, on)
     expect((await ui.find({ type: 'Text', text: /Context phiên này/ }))?.text).toBe('Context phiên này: 70% còn lại')
     await ui.unmount()
   }
+})
+
+test('terminal giữ layout chữ; desktop/vscode/mobile có văn phòng, avatar và bar chỉ khi đang chạy', async ($, on) => {
+  const { clock, usage, snapshot } = setup(on, { agents: [
+    { id: 'running', name: 'Người làm', type: 'Explore', description: 'Khảo sát mã', status: 'running' },
+    { id: 'waiting', name: 'Người chờ', type: 'Explore', description: 'Chờ duyệt', status: 'waiting' },
+    { id: 'idle', name: 'Người nghỉ', type: 'Explore', description: 'Đã khảo sát', status: 'idle' },
+  ] })
+  usage.cost = { usd: 0.012 }
+  await start($)
+  await clock.settle()
+  expect(snapshot().claudeCost).toBe(0.012)
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const svgs = await ui.findAll({ type: 'Svg' })
+    if (surface === 'terminal') {
+      expect(svgs.length).toBe(0)
+      expect((await ui.find({ type: 'Text', text: /^Các agent$/ }))?.text).toBe('Các agent')
+      expect(await ui.find({ type: 'Text', text: 'Văn phòng Agent' })).toBe(undefined)
+    } else {
+      expect((await ui.find({ type: 'Text', text: 'Văn phòng Agent' }))?.text).toBe('Văn phòng Agent')
+      expect(svgs.length).toBe(6) // Văn phòng, 4 avatar, 1 bar.
+      expect(svgs[0]?.props.isInteractive).toBe(true)
+      expect(svgs[0]?.props.alt).toBe('Văn phòng: 3 agent đang làm, 1 agent đang nghỉ')
+      const avatars = svgs.filter(svg => String(svg.props.alt).startsWith('Chân dung'))
+      expect(avatars.length).toBe(4)
+      expect(avatars.every(svg => svg.props.isInteractive === undefined)).toBe(true)
+      const bars = svgs.filter(svg => String(svg.props.alt).startsWith('Đang xử lý'))
+      expect(bars.length).toBe(1)
+      expect(String(bars[0]?.props.source).includes('<animate ')).toBe(true)
+      expect(svgs.every(svg => !String(svg.props.source).includes('%'))).toBe(true)
+      expect((await ui.find({ type: 'Text', text: '≈$0.01' }))?.text).toBe('≈$0.01')
+      expect(await ui.find({ key: 'view:running' })).toBeDefined()
+      expect(await ui.find({ key: 'view:idle' })).toBeDefined()
+    }
+    await ui.unmount()
+  }
+})
+
+test('lưu model spawn và chi phí đo thực tế, card không suy đoán phần trăm tiến độ', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-test', agentId: 'child' }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  await start($)
+  await clock.settle()
+  await $.agent.spawn(spawn('Người khảo sát'))
+  await $.session.measure({ context: { window: 100, percent: 20 }, rateLimits: [], cost: { usd: 1.234 }, changed: ['cost'] })
+  expect(snapshot().agents.find(agent => agent.id === 'child')?.model).toBe('claude-sonnet-test')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Agent con Claude.*claude-sonnet-test/ }))?.text)
+    .toBe('Agent con Claude · Người khảo sát · claude-sonnet-test · ● Đang chạy')
+  expect((await ui.find({ type: 'Text', text: '≈$1.23' }))?.text).toBe('≈$1.23')
+  const card = await ui.find({ key: 'card:child' })
+  expect(card?.text.includes('%')).toBe(false)
+  expect(card?.text.includes('Khảo sát mã nguồn')).toBe(true)
+  await ui.unmount()
+})
+
+test('poll chỉ đổi SVG tại ranh giới tương tác, tick và rời sân khấu', async ($, on) => {
+  const agents: AgentInfo[] = [{ id: 'child', name: 'Người làm', type: 'Explore', description: 'Kiểm tra', status: 'running' }]
+  const { clock, snapshot } = setup(on, { agents })
+  on('session.send', () => ({ isDelivered: true }))
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await $.session.send({ to: 'child', text: 'Kiểm tra tiếp', origin: { kind: 'model' } })
+  const active = (await ui.find({ type: 'Svg' }))?.props.source
+  await clock.advance(3000)
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(active)
+  await clock.advance(9000)
+  const expired = (await ui.find({ type: 'Svg' }))?.props.source
+  expect(expired === active).toBe(false)
+  expect(String(expired).includes('<animateMotion')).toBe(false)
+  agents[0]!.status = 'completed'
+  await clock.advance(3000)
+  const done = (await ui.find({ type: 'Svg' }))?.props.source
+  expect(String(done).includes('>✓</text>')).toBe(true)
+  const seat = snapshot().officeSeats?.child
+  await clock.advance(57000)
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(done)
+  expect(snapshot().officeSeats?.child).toEqual(seat)
+  await clock.advance(3000)
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source).includes('>✓</text>')).toBe(false)
+  await clock.advance(240000)
+  expect(snapshot().officeSeats?.child).toBe(undefined)
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(renderOfficeSvg(buildScene(snapshot(), NOW + 315000)))
+  await ui.unmount()
 })
 
 test('session.measure cập nhật phần trăm còn lại và cảnh báo theo limit còn lại', async ($, on) => {
@@ -596,8 +684,8 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
   expect((await ui.find({ type: 'Text', text: 'Đã chạm limit' }))?.text).toBe('Đã chạm limit')
   expect((await ui.find({ type: 'Text', text: /Cập nhật lúc/ }))?.text)
     .toBe(`Cập nhật lúc ${new Date(NOW).getHours().toString().padStart(2, '0')}:00:00 (theo lần gọi Codex gần nhất)`)
-  expect((await ui.find({ type: 'Text', text: /● Đang chạy · game · apply_patch/ }))?.text)
-    .toBe('● Đang chạy · game · apply_patch · 1 lần gọi · 0h 2m · 12.3k token')
+  expect((await ui.find({ type: 'Text', text: /^apply_patch · 1 lần gọi/ }))?.text)
+    .toBe('apply_patch · 1 lần gọi · 0h 2m · 12.3k token')
   expect((await ui.find({ type: 'Text', text: /Mỗi nhóm là limit riêng/ }))?.text)
     .toBe('Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.')
   await clock.advance(12000)

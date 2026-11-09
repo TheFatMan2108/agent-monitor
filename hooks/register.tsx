@@ -4,11 +4,12 @@ import type {
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
 import type { AgentRow, CodexData, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState, OtherSession } from '../types'
+import { buildScene, renderAvatarSvg, renderOfficeSvg } from './office'
 
 const PANE = 'agent-monitor'
 const MAIN = '@main'
 const CODEX = '@codex'
-const SHAPE = 'monitor-3'
+const SHAPE = 'monitor-4'
 const REF = { plugin: 'agent-monitor', key: 'monitor' } as const
 const INITIAL: MonitorState = {
   agents: [], limits: [], contextRemaining: null, feed: [], sessions: null, codex: null,
@@ -73,12 +74,17 @@ function cap(state: MonitorState): void {
 // CAS bảo vệ các tool chạy đồng thời. So sánh JSON trước khi ghi để phiên rảnh
 // không redraw; shape từ phiên bản cũ được xử lý giống atom của ví dụ pane.
 async function change($: CoreEngineInterface, edit: (state: MonitorState) => void): Promise<void> {
+  const now = await $.clock.now()
   for (let attempt = 0; attempt < 8; attempt++) {
     const held = await $.state.get(REF)
     const before = held.value?.shape === SHAPE ? held.value.value : INITIAL
     const after = structuredClone(before)
     edit(after)
     cap(after)
+    const scene = buildScene(after, now)
+    after.officeSeats = Object.fromEntries(scene.agents.map(agent => [agent.id,
+      { zone: agent.zone, seat: agent.seat, firstSeen: agent.firstSeen }]))
+    after.officePhase = JSON.stringify([scene.interactions, scene.agents.filter(agent => agent.tick).map(agent => agent.id)])
     if (JSON.stringify(before) === JSON.stringify(after)) return
     const written = await $.state.set(REF, { shape: SHAPE, value: after }, { ifVersion: held.version })
     if (written.isSet) return
@@ -478,7 +484,10 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
           const revision = runtime.usageRevision
           const usage = await $.session.usage()
           await change($, state => {
-            if (runtime.usageRevision === revision) setUsage(state, usage.rateLimits, usage.context, now)
+            if (runtime.usageRevision === revision) {
+              setUsage(state, usage.rateLimits, usage.context, now)
+              state.claudeCost = finite(usage.cost?.usd) && usage.cost.usd >= 0 ? usage.cost.usd : null
+            }
             const main = ensureAgent(state, MAIN, usage.startedAt)
             main.startedAt = usage.startedAt
             main.elapsed = elapsed(main.startedAt, main.stoppedAt ?? now)
@@ -633,6 +642,7 @@ export const register: Register = (on, options) => {
         if (isNewTurn) {
           const usage = e.usage
           if (usage) row.tokens += usage.input_tokens + usage.output_tokens + usage.cache_creation_input_tokens
+          if (usage?.model) row.model = clean(usage.model)
           row.turns = [...row.turns, e.turnId].slice(-64)
         }
         // turn.complete kết thúc một lượt, chưa khẳng định teammate đã kết thúc.
@@ -659,6 +669,7 @@ export const register: Register = (on, options) => {
         row.parentId = e.parentAgentId ?? MAIN
         row.name = clean(e.name) || clean(e.subagentType)
         row.description = clean(e.description)
+        row.model = clean(result.model)
         if (!row.turns.length) row.status = 'running'
         addFeed(state, { at: now, kind: 'spawn', from: row.parentId,
           to: row.id, text: clean(e.description) })
@@ -681,7 +692,10 @@ export const register: Register = (on, options) => {
     runtime.usageRevision++
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => setUsage(state, e.rateLimits, e.context, now))
+      await change($, state => {
+        setUsage(state, e.rateLimits, e.context, now)
+        if (e.cost) state.claudeCost = finite(e.cost.usd) && e.cost.usd >= 0 ? e.cost.usd : null
+      })
     })
     return await next(e)
   })
@@ -697,7 +711,11 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    // Engine bổ sung constructor Fragment cho phần tử surface không hỗ trợ.
+    const Svg = 'Svg' in elements && elements.Svg({ source: '<svg/>', alt: '' }).type === 'Svg'
+      ? elements.Svg : undefined
     const state = await read($, monitor)
     const now = await $.clock.now()
     const agents = orderedAgents(state.agents)
@@ -706,8 +724,50 @@ export const register: Register = (on, options) => {
     const baseRows = 10 + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
       + (e.props.view.agentId ? 1 : 0) + (state.sessions === null ? 0 : 1 + Math.max(1, state.sessions.length))
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
+    const scene = Svg ? buildScene(state, now) : undefined
+    const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
+    const resting = scene?.agents.filter(agent => agent.zone === 'lounge') ?? []
+    const main = state.agents.find(agent => agent.id === MAIN)
+    const totalTokens = state.agents.reduce((sum, row) => sum + row.tokens, 0)
+      + (state.codex?.runs.reduce((sum, run) => sum + (run.tokens ?? 0), 0) ?? 0)
+    const activityBar = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="4" viewBox="0 0 240 4"><rect width="240" height="4" fill="#e7ddc6"/><rect width="48" height="4" fill="#79a49b"><animate attributeName="x" values="-48;240" dur="2s" repeatCount="indefinite"/></rect></svg>'
+    const cards = (rows: NonNullable<typeof scene>['agents'], small: boolean) => rows.map(agent => {
+      const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
+        : agent.kind === 'subagent' ? 'Agent con Claude' : 'Phiên Claude khác'
+      const status = agent.status === 'stopped' ? CODEX_STATUS.stopped : STATUS[agent.status]
+      const detail = `${agent.tool} · ${agent.tools} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
+      return <Box key={`card:${agent.id}`} flexDirection="row" gap={1} padding={1} borderStyle="round" borderColor="subtle">
+        {Svg && <Svg source={renderAvatarSvg(agent.lookSeed, agent.kind)} alt={`Chân dung ${agent.name}`} width={36} height={36} />}
+        <Box flexDirection="column" flexGrow={1}>
+          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text> · {agent.name} · {agent.task} · {status} · {detail}</Text>
+            : <>
+              <Text bold>{agent.task}</Text>
+              <Text color={agent.kind === 'codex' ? 'success' : agent.kind === 'main' ? 'claude' : 'suggestion'}>{type} · {agent.name}{agent.model ? ` · ${agent.model}` : ''} · {status}</Text>
+              <Text dimColor>{detail}</Text>
+              {Svg && agent.status === 'running' && <Svg source={activityBar} alt="Đang xử lý, chưa có số liệu tiến độ" height={4} />}
+            </>}
+        </Box>
+        {agent.kind === 'subagent' && <Button key={`view:${agent.id}`} label="Xem" onPress={() => {}} />}
+      </Box>
+    })
     return (
       <Box flexDirection="column">
+        {Svg && scene && <>
+          <Text bold size="heading">Văn phòng Agent</Text>
+          <Svg source={renderOfficeSvg(scene)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} isInteractive />
+          <Box flexDirection="row" gap={1}>
+            <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
+              <Text dimColor>Chi phí Claude</Text>
+              <Text bold>{state.claudeCost == null ? 'Chưa rõ' : `≈$${state.claudeCost.toFixed(2)}`}</Text>
+            </Box>
+            <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
+              <Text dimColor>Token</Text><Text bold>{compact(totalTokens)}</Text>
+            </Box>
+            <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
+              <Text dimColor>Thời gian</Text><Text bold>{main ? elapsed(main.startedAt, now) : '<1m'}</Text>
+            </Box>
+          </Box>
+        </>}
         <Text bold>Limit còn lại</Text>
         <Text bold>Claude Code</Text>
         {state.limits.length === 0 && <Text dimColor>{EMPTY_LIMITS}</Text>}
@@ -735,6 +795,12 @@ export const register: Register = (on, options) => {
         </Box>}
         <Text dimColor>Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.</Text>
 
+        {Svg ? <>
+          <Text bold>Đang làm · {working.length}</Text>
+          {cards(working, false)}
+          <Text bold>Đang nghỉ · {resting.length}</Text>
+          {cards(resting, true)}
+        </> : <>
         <Text bold>Các agent</Text>
         {agents.length === 0 && <Text dimColor>Claude Code · ○ Rảnh · Chưa có hoạt động</Text>}
         {agents.map(({ row, depth }) => (
@@ -751,6 +817,7 @@ export const register: Register = (on, options) => {
         {state.codex?.runs.map(run => <Text>
           {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
         </Text>)}
+        </>}
         {e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}
         <Text bold>Tương tác</Text>
         {state.feed.length === 0 && <Text dimColor>Chưa có tương tác.</Text>}

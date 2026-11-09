@@ -4,6 +4,7 @@ export type AgentRow = {
   parentId?: string
   name: string
   description: string
+  model?: string
   status: 'pending' | 'running' | 'waiting' | 'idle' | 'completed' | 'failed' | 'killed'
   startedAt: number
   stoppedAt?: number
@@ -67,6 +68,34 @@ export type MonitorState = {
   feed: FeedItem[]
   sessions: OtherSession[] | null
   codex: CodexData | null
+  claudeCost?: number | null
+  officeSeats?: Record<string, OfficeSeat>
+  officePhase?: string
+}
+
+export type OfficeZone = 'work' | 'lounge'
+export type OfficeKind = 'main' | 'subagent' | 'codex' | 'session'
+export type OfficeStatus = AgentRow['status'] | 'stopped'
+export type OfficeSeat = { zone: OfficeZone; seat: number; firstSeen: number }
+export type OfficeAgent = OfficeSeat & {
+  id: string
+  name: string
+  task: string
+  kind: OfficeKind
+  status: OfficeStatus
+  lookSeed: string
+  parentSeed?: string
+  model?: string
+  tool: string
+  tools: number
+  elapsed: string
+  tokens: number | null
+  tick: boolean
+}
+export type OfficeScene = {
+  agents: OfficeAgent[]
+  interactions: { from: string; to: string; kind: 'spawn' | 'send' | 'codex' }[]
+  overflow: { work: number; lounge: number }
 }
 
 declare module 'claude-code' {

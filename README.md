@@ -1,12 +1,19 @@
 # Agent Monitor
 
-Mod cho Claude Code: một pane nằm cạnh khung chat, cho bạn thấy cùng lúc **Claude Code** và **Codex CLI** đang làm gì, giao việc cho nhau ra sao, và **mỗi bên còn bao nhiêu limit**.
+Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi **Claude Code**, **Codex CLI** và các subagent là những nhân vật đang làm việc, nhắn tin cho nhau, và bạn thấy luôn **mỗi bên còn bao nhiêu limit**.
 
-![Hình minh họa pane Agent Monitor](docs/preview.svg)
+![Văn phòng Agent do mod vẽ](docs/preview.svg)
 
-*Hình minh họa với dữ liệu mẫu, không phải ảnh chụp màn hình.*
+*Hình do chính mod vẽ từ dữ liệu mẫu.*
 
 ## Tính năng
+
+**Văn phòng trực quan**
+- Mỗi agent là một nhân vật có ngoại hình cố định. Claude Code mặc áo khoác đất nung, Codex CLI mặc hoodie tối, subagent đeo thẻ.
+- Đang chạy thì ngồi gõ phím ở bàn, cần bạn thì giơ tay với dấu `?`, lỗi thì hiện `!`, xong việc thì ra khu nghỉ.
+- Thư bay giữa các nhân vật khi chúng giao việc hoặc nhắn nhau. Di chuột lên nhân vật để xem tên và việc đang làm.
+- Bên dưới là thẻ tổng chi phí Claude, token, thời gian, và thẻ riêng cho từng agent.
+- Trên terminal không vẽ được SVG, nên pane hiển thị dạng chữ.
 
 **Limit riêng cho từng agent**
 - Claude Code: limit 5 giờ, limit tuần, thời gian đến lúc reset, và context còn lại của phiên.
@@ -58,6 +65,7 @@ Mod chỉ quan sát, không chặn hay sửa bất kỳ lệnh gọi nào. Mod k
 
 ## Hạn chế
 
+- Thanh chạy dưới mỗi agent chỉ báo agent đang hoạt động, không phải phần trăm tiến độ, vì các agent không báo số liệu này. Chi phí chỉ tính cho Claude.
 - Limit Codex chỉ cập nhật khi Codex thực sự gọi API. Sau giờ reset, pane báo đã reset thay vì giữ con số cũ.
 - Định dạng log của Codex không phải API công khai, nên có thể thay đổi theo phiên bản. Khi không đọc được, phần Codex sẽ ẩn hoặc báo chưa có dữ liệu, không ảnh hưởng phiên làm việc.
 - Limit của Claude chỉ có với gói subscription và sau lượt gọi API đầu tiên.
