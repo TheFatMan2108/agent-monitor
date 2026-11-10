@@ -145,7 +145,7 @@ test('giả vờ làm 15s, báo xong 4s rồi về; hitbox không chiếm ghế 
   remember(data, original)
   const seats = structuredClone(data.officeSeats)
   const oldBox = officeHitboxes(original).find(box => box.id === 'rest')!
-  expect(oldBox).toEqual({ id: 'rest', x: 226, y: 65, w: 24, h: 33, draggable: true })
+  expect(oldBox).toEqual({ id: 'rest', name: original.agents.find(agent => agent.id === 'rest')!.name, x: 226, y: 65, w: 24, h: 33, draggable: true })
   expect(officeHitboxes(original).find(box => box.id === '@main')?.draggable).toBe(false)
   playFun(data, original.agents.find(agent => agent.id === 'rest')!, 'work', NOW)
   const working = buildScene(data, NOW + 14999)

@@ -277,10 +277,10 @@ function position(agent: OfficeAgent): { x: number; y: number } {
 export const OFFICE_WORK_AREA = { x: 0, y: 0, w: 210, h: 210 } as const
 
 /** Hộp thân của từng nhân vật trên sân khấu; ghế chờ không nhận chuột. */
-export function officeHitboxes(scene: OfficeScene): Array<{ id: string; x: number; y: number; w: number; h: number; draggable: boolean }> {
+export function officeHitboxes(scene: OfficeScene): Array<{ id: string; name: string; x: number; y: number; w: number; h: number; draggable: boolean }> {
   return scene.agents.filter(agent => agent.seat >= 0).map(agent => {
     const { x, y } = position(agent)
-    return { id: agent.id, x: x - 12, y, w: 24, h: 33, draggable: agent.zone === 'lounge' && !agent.fake }
+    return { id: agent.id, name: agent.name, x: x - 12, y, w: 24, h: 33, draggable: agent.zone === 'lounge' && !agent.fake }
   })
 }
 

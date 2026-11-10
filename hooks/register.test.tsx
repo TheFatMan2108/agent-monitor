@@ -1411,6 +1411,22 @@ test('kéo desktop snap hai trục, flush 100ms, lưu khi thả và nhận props
   const handleIndex = initialOrder.findIndex(element => element.key === 'office-resize')
   expect(initialOrder[handleIndex + 1]?.type).toBe('Box')
   expect(initialOrder[handleIndex + 2]?.type).toBe('Svg')
+  const stage = initialOrder[handleIndex + 1]!
+  expect(stage.props.position).toBe('relative')
+  expect(stage.props.width).toBe(480 / 8)
+  expect(stage.props.height).toBe(315 / 18)
+  expect(stage.props.overflow).toBe('visible')
+  const overlay = initialOrder[handleIndex + 3]!
+  expect(overlay.type).toBe('Box')
+  expect(overlay.props.position).toBe('absolute')
+  expect(overlay.props.width).toBe('100%')
+  expect(overlay.props.height).toBe('100%')
+  expect(overlay.props.overflow).toBe('visible')
+  const play = initialOrder[handleIndex + 4]!
+  expect(play.key).toBe('office-play')
+  expect(play.props.width).toBe('100%')
+  expect(play.props.height).toBe('100%')
+  expect((await ui.find({ type: 'Text', text: /^Click nhân vật để quất roi/ }))?.props.dimColor).toBe(true)
   await ui.pointer({ in: 'office-resize', type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'right' })
   await ui.pointer({ in: 'office-resize', type: 'move', x: 18, y: 3, button: 'right' })
   await ui.advance(100)
@@ -1552,6 +1568,8 @@ test('ui.fault đúng Client chuyển desktop sang nút dự phòng', async ($, 
   await dispatchFault('office-play')
   expect(faultState.officePlayFailed).toBe(true)
   expect(await ui.find({ key: 'office-play' })).toBe(undefined)
+  expect((await ui.find({ type: 'Text', text: /^Lớp click lỗi/ }))?.props.dimColor).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^Click nhân vật để quất roi/ })).toBe(undefined)
   expect(await ui.find({ key: 'office-resize' })).toBeDefined()
   expect(await ui.find({ key: 'fun:whip:@main' })).toBeDefined()
   await dispatchFault('office-resize')
@@ -1596,6 +1614,105 @@ test('mức zoom đã lưu được dùng lại ở phiên sau, giá trị hỏn
   await start($)
   await clock.settle()
   expect(snapshot().officeView).toEqual({ x: 40, y: 30, w: 160, h: 105 })
+})
+
+test('lớp click ước lượng từng trục chưa layout; mục tiêu không kéo được quất ngay down một lần', async ($, on) => {
+  const { clock, snapshot } = setup(on)
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const frame = officeFrame(FULL_VIEW)
+  const box = officeHitboxes(buildScene(snapshot(), NOW)).find(item => item.id === '@main')!
+  expect(box.draggable).toBe(false)
+  const dimensions = [{ columns: 0, rows: 0 }, { columns: 80, rows: 0 }, { columns: 0, rows: 42 }, { columns: 80, rows: 42 }]
+  for (let i = 0; i < dimensions.length; i++) {
+    const size = dimensions[i]!
+    await ui.resize({ in: 'office-play', ...size })
+    const columns = size.columns || frame.w / 8
+    const rows = size.rows || frame.h / 18
+    const diagnostic = (await ui.find({ type: 'Text', text: /^🪢/, in: 'office-play' }))!
+    expect(diagnostic.props.dimColor).toBe(true)
+    expect(diagnostic.text.includes(`vùng ${Math.round(columns * 10) / 10}×${Math.round(rows * 10) / 10}`)).toBe(true)
+    expect(diagnostic.text.includes('(ước lượng)')).toBe(size.columns === 0 || size.rows === 0)
+    const x = (box.x + box.w / 2) / FULL_VIEW.w * columns
+    const y = (box.y + box.h / 2) / FULL_VIEW.h * rows
+    const pointer = { in: 'office-play', x: Math.floor(x), y: Math.floor(y), fine: { x, y }, button: 'left' as const }
+    await ui.pointer({ ...pointer, type: 'down' })
+    expect(snapshot().fun?.reactions['@main'].count).toBe(i + 1)
+    expect((await ui.find({ type: 'Text', text: /^🪢/, in: 'office-play' }))?.text.includes(`bấm ${i + 1} → ${box.name}`)).toBe(true)
+    await clock.advance(400) // Qua chống spam để phát hiện up/leave quất lặp.
+    await ui.pointer({ ...pointer, type: 'up' })
+    await ui.pointer({ ...pointer, type: 'leave', button: undefined })
+    expect(snapshot().fun?.reactions['@main'].count).toBe(i + 1)
+  }
+  expect(snapshot().fun?.reactions['@main'].count).toBe(4)
+  await ui.unmount()
+  for (const surface of ['terminal', 'vscode', 'mobile'] as const) {
+    const other = await $.ui.mount({ ...PANE, surface })
+    expect(await other.find({ type: 'Text', text: /^Click nhân vật để quất roi/ })).toBe(undefined)
+    expect(await other.find({ type: 'Text', text: /^Lớp click lỗi/ })).toBe(undefined)
+    await other.unmount()
+  }
+})
+
+test('hover, click gần trong 40, trượt ngoài 40 và thiếu up đều có chẩn đoán, không quất lặp', async ($, on) => {
+  const { clock, snapshot } = setup(on, { agents: [
+    { id: 'rest', name: 'Người nghỉ', type: 'Explore', description: '', status: 'idle' },
+  ] })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.resize({ in: 'office-play', columns: 320, rows: 210 })
+  const box = officeHitboxes(buildScene(snapshot(), NOW)).find(item => item.id === 'rest')!
+  const x = box.x + box.w / 2
+  const y = box.y + box.h / 2
+  expect(box.draggable).toBe(true)
+  const pointer = (type: 'down' | 'up' | 'move' | 'leave', px = x, button?: 'left' | 'right') => ui.pointer({
+    in: 'office-play', type, x: Math.floor(px), y: Math.floor(y), fine: { x: px, y }, button,
+  })
+  const diagnostic = async () => (await ui.find({ type: 'Text', text: /^🪢/, in: 'office-play' }))!.text
+  expect((await diagnostic()).includes('Click nhân vật để quất')).toBe(true)
+  const boxes = await ui.findAll({ type: 'Box', in: 'office-play' })
+  expect(boxes[1]?.props.position).toBe('absolute')
+  expect(boxes[1]?.props.bottom).toBe(0)
+  expect(boxes[1]?.props.left).toBe(0)
+  await pointer('move')
+  expect((await diagnostic()).includes(`🪢 ${box.name} ·`)).toBe(true)
+  await pointer('move', x + 0.1)
+  expect((await diagnostic()).includes('bấm 0')).toBe(true)
+  await pointer('leave')
+  expect((await diagnostic()).includes('Click nhân vật để quất')).toBe(true)
+  await pointer('down', x, 'right')
+  expect((await diagnostic()).includes('bấm 0')).toBe(true)
+  // Desktop kit dùng tâm ô (x + 0.5), nên 39 thành 39.5: vẫn trong 40.
+  for (const offset of [30, 39]) {
+    await pointer('down', x + offset, 'left') // Ngoài hộp + dung sai, trong bán kính tâm.
+    expect(snapshot().fun?.reactions.rest?.count).toBe(offset === 30 ? undefined : 1)
+    await pointer('up', x + offset, 'left')
+    expect(snapshot().fun?.reactions.rest.count).toBe(offset === 30 ? 1 : 2)
+    await clock.advance(400)
+  }
+  expect(snapshot().fun?.reactions.rest.count).toBe(2)
+  expect((await diagnostic()).includes(`bấm 2 → ${box.name}`)).toBe(true)
+  const beforeMiss = structuredClone(snapshot())
+  await pointer('down', x + 40.1, 'left')
+  await pointer('up', x + 40.1, 'left')
+  expect(snapshot()).toEqual(beforeMiss)
+  expect((await diagnostic()).includes('bấm 3 → trượt')).toBe(true)
+  await pointer('move', x + 40.1)
+  expect((await diagnostic()).includes('Click nhân vật để quất')).toBe(true)
+  for (const release of ['move', 'leave'] as const) {
+    await pointer('down', x, 'left')
+    const before = snapshot().fun!.reactions.rest.count
+    await pointer(release)
+    expect(snapshot().fun?.reactions.rest.count).toBe(before + 1)
+    await clock.advance(400)
+    await pointer('up', x, 'left')
+    expect(snapshot().fun?.reactions.rest.count).toBe(before + 1)
+  }
+  expect((await diagnostic()).includes(`bấm 5 → ${box.name}`)).toBe(true)
+  expect(snapshot().fun?.reactions.rest.count).toBe(4)
+  await ui.unmount()
 })
 
 test('desktop click và kéo theo hiệu chuẩn, zoom/cỡ mới; chỉ đổi state vui và về sau 15s+4s', async ($, on) => {

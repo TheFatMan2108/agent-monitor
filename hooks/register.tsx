@@ -1173,12 +1173,16 @@ export const register: Register = (on, options) => {
             <Button key="office:right" label="▶" onPress={() => {}} />
           </Box> : null}
           {Client && !state.officeDragFailed && <Client key="office-resize" module="./office-resize.tsx" props={{ width: frame.w, height: frame.h }} width="100%" />}
-          {Client && !state.officePlayFailed ? <Box position="relative">
+          {/* Svg dùng px, Box dùng ô 8×18; cố định khung để Client 100% có chiều cao. */}
+          {Client && !state.officePlayFailed ? <Box position="relative" width={frame.w / 8} height={frame.h / 18} flexDirection="column" flexShrink={0} alignSelf="flex-start" overflow="visible">
             {officeSvg}
-            <Box position="absolute" top={0} left={0} width="100%" height="100%">
+            <Box position="absolute" top={0} left={0} width="100%" height="100%" overflow="visible">
               <Client key="office-play" module="./office-play.tsx" props={{ frame, view, targets: officeHitboxes(scene) }} width="100%" height="100%" />
             </Box>
           </Box> : officeSvg}
+          {Client && <Text dimColor>{state.officePlayFailed
+            ? 'Lớp click lỗi, dùng nút trên thẻ để quất roi hoặc gọi đi làm.'
+            : 'Click nhân vật để quất roi, kéo nhân vật đang nghỉ sang khu làm việc. Không được thì dùng nút trên thẻ.'}</Text>}
           {state.officeSize && <Box flexDirection="row"><Button key="office:size-reset" label="Cỡ gốc" onPress={() => {}} /></Box>}
           <Box flexDirection="row" gap={1}>
             <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
