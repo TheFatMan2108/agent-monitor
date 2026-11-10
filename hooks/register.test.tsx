@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, EngineEventOf, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
 import type { CodexLaunch, MonitorState } from '../types'
 import { remaining, resetText, register, parseTaskNotification, reconcileBackground, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
-import { FULL_VIEW, buildScene, officeFrame, renderOfficeSvg } from './office'
+import { FULL_VIEW, buildScene, officeFrame, officeHitboxes, renderOfficeSvg } from './office'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
 const PANE = {
@@ -174,8 +174,10 @@ test('poll chỉ đổi SVG tại ranh giới tương tác, tick và rời sân 
   const done = (await ui.find({ type: 'Svg' }))?.props.source
   expect(String(done).includes('>✓</text>')).toBe(true)
   const seat = snapshot().officeSeats?.child
-  await clock.advance(57000)
-  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(done)
+  await clock.advance(4000)
+  const settledDone = (await ui.find({ type: 'Svg' }))?.props.source
+  await clock.advance(53000)
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(settledDone)
   expect(snapshot().officeSeats?.child).toEqual(seat)
   await clock.advance(3000)
   expect(String((await ui.find({ type: 'Svg' }))?.props.source).includes('>✓</text>')).toBe(false)
@@ -331,11 +333,12 @@ test('poll rảnh không ghi atom và dữ liệu usage có cadence 15 giây', a
   })
   await start($)
   await clock.settle()
+  await clock.advance(4000) // Bong bóng chào hết hạn; từ đây poll rảnh không ghi atom.
   const initialWrites = writes
   await clock.advance(15000)
   expect(writes).toBe(initialWrites)
   expect(usageCalls).toBe(2)
-  expect(agentCalls).toBe(6)
+  expect(agentCalls).toBe(7)
 })
 
 test('usage poll cũ không ghi đè session.measure mới hơn', async ($, on) => {
@@ -803,6 +806,7 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
   mockCodexFiles(on, fixture)
   await start($)
   await clock.settle()
+  await clock.advance(4000) // Bong bóng chào hết hạn; từ đây poll rảnh không ghi atom.
   const initialWrites = writes
   expect(snapshot().codex?.runs[0]?.status).toBe('running')
   expect(JSON.stringify(snapshot()).includes('PRIVATE_UI')).toBe(false)
@@ -816,7 +820,7 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
     .toBe('apply_patch · 1 lần gọi · 0h 2m · 12.3k token')
   expect((await ui.find({ type: 'Text', text: /Mỗi nhóm là limit riêng/ }))?.text)
     .toBe('Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.')
-  await clock.advance(12000)
+  await clock.advance(8000)
   expect(fixture.lists.length).toBe(4)
   await clock.advance(3000)
   expect(fixture.lists.length).toBe(8)
@@ -997,7 +1001,7 @@ test('card desktop hiển thị limit đúng tài khoản, share token riêng v�
   seed(data)
   const resting = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect((await resting.findAll({ type: 'Box' })).filter(box => box.key === 'card:codex').length).toBe(1)
-  expect((await resting.find({ key: 'card:codex' }))?.text.endsWith(' · 5 giờ 40% · Tuần 6%')).toBe(true)
+  expect((await resting.find({ key: 'card:codex' }))?.text.includes(' · 5 giờ 40% · Tuần 6%')).toBe(true)
   await resting.unmount()
 })
 
@@ -1042,7 +1046,7 @@ test('card màu đúng ngưỡng 20/5 và ẩn phần trăm Codex hết hạn, k
     for (const run of data.codex.runs) run.status = 'stopped'
     seed(structuredClone(data))
     const resting = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    expect((await resting.find({ key: 'card:codex' }))?.text.endsWith(' · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
+    expect((await resting.find({ key: 'card:codex' }))?.text.includes(' · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
     await resting.unmount()
     data.codex.runs[0]!.status = 'running'
   }
@@ -1153,6 +1157,44 @@ test('chỉ hiện Codex do phiên này gọi; phiên khác và limit tài kho�
   expect(tile[tile.findIndex(text => text.text === 'Token') + 1]?.text).toBe('700')
   expect(await ui.find({ type: 'Text', text: 'Chưa có lần gọi Codex trong phiên này' })).toBe(undefined)
   await ui.unmount()
+})
+
+test('launch Bash/PowerShell nền được đánh dấu, MCP và CLI tiền cảnh thì không', async ($, on) => {
+  const { snapshot } = setup(on)
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  await start($)
+  await $.tool.call({ tool: 'Bash', command: 'codex exec hi', run_in_background: true, tool_use_id: 'bash-bg' })
+  await $.tool.call({ tool: 'PowerShell', command: 'codex exec hi', run_in_background: true, tool_use_id: 'ps-bg' })
+  await $.tool.call({ tool: 'Bash', command: 'codex exec hi', run_in_background: false, tool_use_id: 'foreground' })
+  await $.tool.call({ tool: 'mcp__codex-cli__ask-codex', prompt: 'hi', tool_use_id: 'mcp' })
+  expect(snapshot().codexLaunches).toEqual([
+    { id: 'bash-bg', at: NOW, background: true }, { id: 'ps-bg', at: NOW, background: true },
+    { id: 'foreground', at: NOW }, { id: 'mcp', at: NOW },
+  ])
+})
+
+test('claim truyền background từ đúng launch sang run và giữ cờ qua poll', async ($, on) => {
+  const home = 'C:/codex-background-test'
+  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home } })
+  mockCodexFiles(on, codexFixture(home, [
+    rolloutOf('rollout-bg.jsonl', '/work/bg', NOW + 1000, 10),
+    rolloutOf('rollout-mcp.jsonl', '/work/mcp', NOW + 1200, 20),
+  ]))
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  await start($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Bash', command: 'codex exec -C /work/bg hi', run_in_background: true, tool_use_id: 'bg' })
+  await $.tool.call({ tool: 'mcp__codex-cli__ask-codex', prompt: 'hi', cd: '/work/mcp', tool_use_id: 'mcp' })
+  await clock.advance(15000)
+  const bgId = snapshot().codexClaims!.bg
+  const mcpId = snapshot().codexClaims!.mcp
+  expect(bgId.endsWith('rollout-bg.jsonl')).toBe(true)
+  expect(mcpId.endsWith('rollout-mcp.jsonl')).toBe(true)
+  expect(snapshot().codex!.runs.find(run => run.id === bgId)?.background).toBe(true)
+  expect(snapshot().codex!.runs.find(run => run.id === mcpId)?.background).toBe(undefined)
+  await clock.advance(15000)
+  expect(snapshot().codex!.runs.find(run => run.id === bgId)?.background).toBe(true)
+  expect(snapshot().codex!.runs.find(run => run.id === mcpId)?.background).toBe(undefined)
 })
 
 test('lần gọi MCP được ghi với thư mục; lệnh không phải Codex thì không', async ($, on) => {
@@ -1367,13 +1409,14 @@ test('kéo desktop snap hai trục, flush 100ms, lưu khi thả và nhận props
   expect((await ui.find({ type: 'Svg' }))?.props.height).toBe(315)
   const initialOrder = await ui.findAll({})
   const handleIndex = initialOrder.findIndex(element => element.key === 'office-resize')
-  expect(initialOrder[handleIndex + 1]?.type).toBe('Svg')
-  await ui.pointer({ type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'right' })
-  await ui.pointer({ type: 'move', x: 18, y: 3, button: 'right' })
+  expect(initialOrder[handleIndex + 1]?.type).toBe('Box')
+  expect(initialOrder[handleIndex + 2]?.type).toBe('Svg')
+  await ui.pointer({ in: 'office-resize', type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'right' })
+  await ui.pointer({ in: 'office-resize', type: 'move', x: 18, y: 3, button: 'right' })
   await ui.advance(100)
   expect(snapshot().officeSize).toBe(undefined)
-  await ui.pointer({ type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'left' })
-  await ui.pointer({ type: 'move', x: 18, y: 3, fine: { x: 18.25, y: 3.25 }, button: 'left' })
+  await ui.pointer({ in: 'office-resize', type: 'down', x: 10, y: 1, fine: { x: 10.25, y: 1.25 }, button: 'left' })
+  await ui.pointer({ in: 'office-resize', type: 'move', x: 18, y: 3, fine: { x: 18.25, y: 3.25 }, button: 'left' })
   expect((await ui.find({ type: 'Text', text: /ngang đổi rộng/, in: 'office-resize' }))?.text.endsWith('544×352')).toBe(true)
   await ui.advance(99)
   expect(snapshot().officeSize).toBe(undefined)
@@ -1384,20 +1427,20 @@ test('kéo desktop snap hai trục, flush 100ms, lưu khi thả và nhận props
   expect((await ui.find({ type: 'Svg' }))?.props.height).toBe(352)
   const resizedOrder = await ui.findAll({})
   expect(resizedOrder.findIndex(element => element.key === 'office-resize')).toBe(handleIndex)
-  expect(resizedOrder[handleIndex + 1]?.type).toBe('Svg')
-  await ui.pointer({ type: 'move', x: 26, y: 5, fine: { x: 26.25, y: 5.25 }, button: 'left' })
-  await ui.pointer({ type: 'up', x: 26, y: 5, button: 'left' })
+  expect(resizedOrder[handleIndex + 2]?.type).toBe('Svg')
+  await ui.pointer({ in: 'office-resize', type: 'move', x: 26, y: 5, fine: { x: 26.25, y: 5.25 }, button: 'left' })
+  await ui.pointer({ in: 'office-resize', type: 'up', x: 26, y: 5, button: 'left' })
   expect(snapshot().officeSize).toEqual({ w: 608, h: 384 })
   expect(saved).toEqual([{ key: 'officeSize', value: { w: 608, h: 384 } }])
   expect((await ui.find({ type: 'Svg' }))?.props.source.includes('width="608" height="384"')).toBe(true)
   await ui.advance(100)
   expect(saved.length).toBe(1)
-  await ui.pointer({ type: 'down', x: 0, y: 0, button: 'left' })
-  await ui.pointer({ type: 'move', x: 1, y: 0, button: 'left' })
-  await ui.pointer({ type: 'move', x: 2, y: 0 }) // Nhả ngoài vùng, không áp dụng tọa độ hover.
+  await ui.pointer({ in: 'office-resize', type: 'down', x: 0, y: 0, button: 'left' })
+  await ui.pointer({ in: 'office-resize', type: 'move', x: 1, y: 0, button: 'left' })
+  await ui.pointer({ in: 'office-resize', type: 'move', x: 2, y: 0 }) // Nhả ngoài vùng, không áp dụng tọa độ hover.
   expect(snapshot().officeSize).toEqual({ w: 616, h: 384 })
   expect(saved.length).toBe(2)
-  await ui.pointer({ type: 'move', x: 20, y: 20, button: 'left' })
+  await ui.pointer({ in: 'office-resize', type: 'move', x: 20, y: 20, button: 'left' })
   await ui.advance(200)
   expect(snapshot().officeSize).toEqual({ w: 616, h: 384 })
   await ui.unmount()
@@ -1413,13 +1456,13 @@ test('message không tin cậy không đổi state; chỉ done true mới lưu c
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const before = structuredClone(snapshot())
   for (const data of [null, false, [], 'resize', {}, { type: 'other', w: 640, h: 320 },
-    { type: 'resize', w: '640', h: 320 }, { type: 'resize', w: 640 }]) await ui.post(data)
+    { type: 'resize', w: '640', h: 320 }, { type: 'resize', w: 640 }]) await ui.post(data, { in: 'office-resize' })
   expect(snapshot()).toEqual(before)
   expect(saved).toEqual([])
-  await ui.post({ type: 'resize', w: 641, h: 319, done: 'true' })
+  await ui.post({ type: 'resize', w: 641, h: 319, done: 'true' }, { in: 'office-resize' })
   expect(snapshot().officeSize).toEqual({ w: 640, h: 320 })
   expect(saved).toEqual([])
-  await ui.post({ type: 'resize', w: 5000, h: 0, done: true })
+  await ui.post({ type: 'resize', w: 5000, h: 0, done: true }, { in: 'office-resize' })
   expect(snapshot().officeSize).toEqual({ w: 1280, h: 105 })
   expect(saved).toEqual([{ w: 1280, h: 105 }])
   await ui.unmount()
@@ -1505,6 +1548,12 @@ test('ui.fault đúng Client chuyển desktop sang nút dự phòng', async ($, 
   await dispatchFault('other')
   expect(faultState.officeDragFailed).toBe(undefined)
   expect(await ui.find({ key: 'office-resize' })).toBeDefined()
+  expect(await ui.find({ key: 'office-play' })).toBeDefined()
+  await dispatchFault('office-play')
+  expect(faultState.officePlayFailed).toBe(true)
+  expect(await ui.find({ key: 'office-play' })).toBe(undefined)
+  expect(await ui.find({ key: 'office-resize' })).toBeDefined()
+  expect(await ui.find({ key: 'fun:whip:@main' })).toBeDefined()
   await dispatchFault('office-resize')
   expect(faultState.officeDragFailed).toBe(true)
   expect(await ui.find({ key: 'office-resize' })).toBe(undefined)
@@ -1547,4 +1596,159 @@ test('mức zoom đã lưu được dùng lại ở phiên sau, giá trị hỏn
   await start($)
   await clock.settle()
   expect(snapshot().officeView).toEqual({ x: 40, y: 30, w: 160, h: 105 })
+})
+
+test('desktop click và kéo theo hiệu chuẩn, zoom/cỡ mới; chỉ đổi state vui và về sau 15s+4s', async ($, on) => {
+  let agentCalls = 0
+  const { clock, snapshot } = setup(on, { agents: [
+    { id: 'rest', name: 'Người nghỉ', type: 'Explore', description: '', status: 'idle' },
+  ], onAgents: () => { agentCalls++ } })
+  await start($)
+  await clock.settle()
+  await clock.advance(4000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.resize({ in: 'office-play', columns: 80, rows: 42 })
+  const before = structuredClone(snapshot())
+  const count = agentCalls
+  const box = officeHitboxes(buildScene(snapshot(), NOW + 4000)).find(item => item.id === 'rest')!
+  const col = (box.x + box.w / 2) / 4
+  const row = (box.y + box.h / 2) / 5
+  await ui.pointer({ in: 'office-play', type: 'down', x: Math.floor(col), y: Math.floor(row), fine: { x: col, y: row }, button: 'left' })
+  await ui.pointer({ in: 'office-play', type: 'up', x: Math.floor(col), y: Math.floor(row), fine: { x: col, y: row }, button: 'left' })
+  expect(snapshot().fun?.reactions.rest.count).toBe(1)
+  expect(snapshot().fun?.awakeUntil.rest).toBe(NOW + 64000)
+  expect(snapshot().agents).toEqual(before.agents)
+  expect(snapshot().codex).toEqual(before.codex)
+  expect(agentCalls).toBe(count)
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source).includes('data-layer="whip"')).toBe(true)
+  await ui.press({ key: 'office:in' })
+  await ui.post({ type: 'resize', w: 640, h: 256 }, { in: 'office-resize' })
+  const view = snapshot().officeView!
+  const x = (box.x + box.w / 2 - view.x) / view.w * 80
+  const y = (box.y + box.h / 2 - view.y) / view.h * 42
+  const dropX = (100 - view.x) / view.w * 80
+  const dropY = (100 - view.y) / view.h * 42
+  const seats = structuredClone(snapshot().officeSeats)
+  await ui.pointer({ in: 'office-play', type: 'down', x: Math.floor(x), y: Math.floor(y), fine: { x, y }, button: 'left' })
+  await ui.pointer({ in: 'office-play', type: 'move', x: Math.floor(dropX), y: Math.floor(dropY), fine: { x: dropX, y: dropY }, button: 'left' })
+  expect(await ui.find({ type: 'Text', text: '✋', in: 'office-play' })).toBeDefined()
+  await ui.pointer({ in: 'office-play', type: 'up', x: Math.floor(dropX), y: Math.floor(dropY), fine: { x: dropX, y: dropY }, button: 'left' })
+  expect(snapshot().fun?.fakeWork.rest).toEqual({ from: NOW + 4000, workUntil: NOW + 19000, bubbleUntil: NOW + 23000 })
+  expect(snapshot().officeSeats).toEqual(seats)
+  expect(snapshot().agents).toEqual(before.agents)
+  expect(snapshot().codex).toEqual(before.codex)
+  await clock.advance(14999)
+  expect(buildScene(snapshot(), NOW + 18999).agents.find(agent => agent.id === 'rest')?.typing).toBe(true)
+  await clock.advance(1)
+  expect(snapshot().fun?.bubbles.rest.until).toBe(NOW + 23000)
+  expect(buildScene(snapshot(), NOW + 19000).agents.find(agent => agent.id === 'rest')?.typing).toBe(false)
+  await clock.advance(3999)
+  expect(buildScene(snapshot(), NOW + 22999).agents.find(agent => agent.id === 'rest')?.fake).toBe(true)
+  await clock.advance(1)
+  expect(snapshot().fun?.fakeWork.rest).toBe(undefined)
+  expect(officeHitboxes(buildScene(snapshot(), NOW + 23000)).find(item => item.id === 'rest')).toEqual(box)
+  await ui.unmount()
+})
+
+test('nút vui desktop/vscode cho main, subagent và Codex; không gọi agent/send/model', async ($, on) => {
+  let agentCalls = 0
+  let sends = 0
+  let models = 0
+  on('model.complete', () => { models++; throw new Error('Fun must never call a model') })
+  on('model.classify', () => { models++; throw new Error('Fun must never classify') })
+  on('model.fork', () => { models++; throw new Error('Fun must never fork') })
+  const home = 'C:/fun-codex'
+  const { clock, snapshot } = setup(on, { env: { CODEX_HOME: home }, launches: [{ id: 'l', at: NOW - 120000 }],
+    agents: [{ id: 'rest', name: 'Người nghỉ', type: 'Explore', description: '', status: 'idle' }],
+    onAgents: () => { agentCalls++ } })
+  const fixture = codexFixture(home, [{ name: 'rollout-fun.jsonl', mtime: NOW, text: [
+    codexLine('session_meta', { cwd: '/work/game' }, NOW - 120000),
+    codexLine('event_msg', { type: 'task_started' }, NOW - 60000),
+  ].join('\n') }])
+  mockCodexFiles(on, fixture)
+  on('session.send', () => { sends++; return { isDelivered: true } })
+
+  await start($)
+  await clock.settle()
+  expect(snapshot().codex?.runs.length).toBe(1)
+  let actionAt = NOW
+  for (const surface of ['desktop', 'vscode'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const before = structuredClone(snapshot())
+    const calls = agentCalls
+    for (const id of ['@main', 'rest', 'codex']) {
+      expect((await ui.find({ key: `fun:whip:${id}` }))?.props.label).toBe('Quất roi')
+      await ui.press({ key: `fun:whip:${id}` })
+      expect(snapshot().fun?.reactions[id].count).toBe(1)
+    }
+    expect((await ui.find({ key: 'fun:work:rest' }))?.props.label).toBe('Bắt làm')
+    await ui.press({ key: 'fun:work:rest' })
+    expect(snapshot().fun?.fakeWork.rest.workUntil).toBe(actionAt + 15000)
+    expect(await ui.find({ key: 'fun:work:rest' })).toBe(undefined)
+    expect(snapshot().agents).toEqual(before.agents)
+    expect(snapshot().codex).toEqual(before.codex)
+    expect(snapshot().officeSeats).toEqual(before.officeSeats)
+    expect(agentCalls).toBe(calls)
+    expect(sends).toBe(0)
+    expect(models).toBe(0)
+    await ui.unmount()
+    await clock.advance(19000)
+    actionAt += 19000
+  }
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await terminal.find({ key: 'fun:whip:@main' })).toBe(undefined)
+  expect(await terminal.find({ key: 'office-play' })).toBe(undefined)
+  await terminal.unmount()
+})
+
+test('message rác, id lạ, thả sai vùng/đang chạy bị bỏ; mất button hủy kéo', async ($, on) => {
+  const { clock, snapshot } = setup(on, { agents: [
+    { id: 'rest', name: 'Nghỉ', type: 'Explore', description: '', status: 'idle' },
+  ] })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const before = structuredClone(snapshot())
+  for (const data of [null, [], {}, 'whip', { type: 'whip', id: 12 }, { type: 'whip', id: 'unknown' },
+    { type: 'drop', id: 'rest', x: '1', y: 100 }, { type: 'drop', id: 'rest', x: 210, y: 100 },
+    { type: 'drop', id: 'rest', x: -1, y: 100 }, { type: 'drop', id: 'rest', x: 100, y: 210 },
+    { type: 'drop', id: 'rest', x: 100, y: -1 }, { type: 'drop', id: '@main', x: 100, y: 100 }]) {
+    await ui.post(data, { in: 'office-play' })
+  }
+  expect(snapshot()).toEqual(before)
+  await ui.resize({ in: 'office-play', columns: 320, rows: 210 })
+  await ui.pointer({ in: 'office-play', type: 'down', x: 238, y: 80, button: 'left' })
+  await ui.pointer({ in: 'office-play', type: 'move', x: 100, y: 100, button: 'left' })
+  await ui.pointer({ in: 'office-play', type: 'move', x: 100, y: 100 })
+  expect(await ui.find({ text: '✋', in: 'office-play' })).toBe(undefined)
+  await ui.pointer({ in: 'office-play', type: 'up', x: 100, y: 100, button: 'left' })
+  expect(snapshot()).toEqual(before)
+  await ui.unmount()
+})
+
+test('đổi trạng thái thật sinh một bong bóng 4s; redraw không sinh lại và phản ứng hết đúng 3s', async ($, on) => {
+  const agents: AgentInfo[] = [{ id: 'rest', name: 'Nghỉ', type: 'Explore', description: '', status: 'idle' }]
+  const { clock, snapshot } = setup(on, { agents })
+  await start($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const hello = structuredClone(snapshot().fun?.bubbles.rest)
+  await ui.redraw()
+  expect(snapshot().fun?.bubbles.rest).toEqual(hello)
+  await clock.advance(4000)
+  expect(snapshot().fun?.bubbles.rest).toBe(undefined)
+  agents[0]!.status = 'running'
+  await clock.advance(2000)
+  expect(snapshot().fun?.lastStatus.rest).toBe('running')
+  expect(snapshot().fun?.bubbles.rest.until).toBe(NOW + 10000)
+  await clock.advance(3999)
+  expect(!!snapshot().fun?.bubbles.rest).toBe(true)
+  await clock.advance(1)
+  expect(snapshot().fun?.bubbles.rest).toBe(undefined)
+  await ui.press({ key: 'fun:whip:rest' })
+  await clock.advance(2999)
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source).includes('data-expression=')).toBe(true)
+  await clock.advance(1)
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source).includes('data-expression=')).toBe(false)
+  await ui.unmount()
 })

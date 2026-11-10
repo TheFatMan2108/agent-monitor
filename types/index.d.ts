@@ -44,6 +44,7 @@ export type CodexSummary = {
   limits: CodexLimits | null
 }
 export type CodexRun = {
+  background?: true
   partial?: boolean
   id: string
   folder: string
@@ -67,9 +68,11 @@ export type BackgroundTask = {
   elapsed: string
 }
 export type ScheduledTask = { id: string; schedule: string; recurring: boolean; prompt: string }
-export type CodexLaunch = { id: string; at: number; cwd?: string }
+export type CodexLaunch = { id: string; at: number; cwd?: string; background?: true }
 export type CodexData = { limits: CodexLimits | null; runs: CodexRun[] }
 export type MonitorState = {
+  fun?: FunState
+  officePlayFailed?: boolean
   agents: AgentRow[]
   limits: LimitRow[]
   contextRemaining: number | null
@@ -94,6 +97,15 @@ export type OfficeKind = 'main' | 'subagent' | 'codex'
 export type OfficeStatus = AgentRow['status'] | 'stopped'
 export type OfficeSeat = { zone: OfficeZone; seat: number; firstSeen: number }
 export type OfficeAgent = OfficeSeat & {
+  background?: true
+  waitingForCodex?: boolean
+  personality?: Personality
+  expression?: Personality
+  sleeping?: boolean
+  speech?: string
+  fake?: boolean
+  typing?: boolean
+  funPosition?: { x: number; y: number }
   partial?: boolean
   id: string
   name: string
@@ -115,6 +127,15 @@ export type OfficeAgent = OfficeSeat & {
     binding: number | null
     share: number | null
   }
+}
+export type Personality = 'shy' | 'grumpy' | 'cheerful' | 'dramatic' | 'lazy' | 'stoic'
+export type FunState = {
+  personalities: Record<string, Personality>
+  reactions: Record<string, { at: number; until: number; count: number }>
+  awakeUntil: Record<string, number>
+  fakeWork: Record<string, { from: number; workUntil: number; bubbleUntil: number }>
+  bubbles: Record<string, { text: string; until: number }>
+  lastStatus: Record<string, string>
 }
 export type OfficeScene = {
   agents: OfficeAgent[]

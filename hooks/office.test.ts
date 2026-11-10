@@ -1,8 +1,223 @@
 import { expect, test } from 'claude-code/testing'
 import type { AgentRow, MonitorState, OfficeKind, OfficeScene } from '../types'
 import { FULL_VIEW, OFFICE_SIZE_LIMITS, buildScene, moveView, officeFrame, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
+import { officeHitboxes } from './office'
+import { playFun, updateFunStatus, nextFunDeadline } from './office-fun'
 
 const NOW = 1804734000000
+
+function backgroundCodexState(): MonitorState {
+  const data = state([row('@main', 'idle')])
+  data.codex = { limits: null, runs: [{ id: 'background', background: true, folder: 'game', status: 'running',
+    lastTool: 'exec', tools: 1, tokens: 10, elapsed: '<1m', lastAt: NOW }] }
+  return data
+}
+
+test('Codex nền ngủ tại bàn không gõ phím; Claude rảnh hóng bằng SMIL ổn định qua redraw', () => {
+  const data = backgroundCodexState()
+  const scene = buildScene(data, NOW)
+  const codex = scene.agents.find(agent => agent.id === 'codex')!
+  expect(codex.zone).toBe('work')
+  expect(codex.sleeping).toBe(true)
+  expect(codex.status).toBe('running')
+  expect(scene.agents.find(agent => agent.id === '@main')?.waitingForCodex).toBe(true)
+  const codexSvg = renderOfficeSvg({ ...scene, agents: [codex] })
+  expect(codexSvg.includes('>z</text>')).toBe(true)
+  expect(codexSvg.includes('data-feature="eye"')).toBe(false)
+  expect(codexSvg.includes('dur=".8s"')).toBe(false)
+  const svg = renderOfficeSvg(scene)
+  for (const value of ['⏳', '👀', '☕', '🤔', '📡', 'Xong chưa?', 'data-layer="codex-wait"', 'dur="6s"', 'calcMode="discrete"']) {
+    expect(svg.includes(value)).toBe(true)
+  }
+  expect(svg.length <= 131072).toBe(true)
+  expect(renderOfficeSvg(buildScene(data, NOW + 1000))).toBe(svg)
+})
+
+test('Claude có tool không hóng; speech và phản ứng roi được ưu tiên', () => {
+  const data = backgroundCodexState()
+  data.agents[0]!.active = [{ id: 'tool', text: 'Bash' }]
+  expect(renderOfficeSvg(buildScene(data, NOW)).includes('data-layer="codex-wait"')).toBe(false)
+  data.agents[0]!.active = []
+  updateFunStatus(data, buildScene(data, NOW).agents, NOW)
+  expect(renderOfficeSvg(buildScene(data, NOW)).includes('data-layer="codex-wait"')).toBe(false)
+  expect(renderOfficeSvg(buildScene(data, NOW + 4000)).includes('data-layer="codex-wait"')).toBe(true)
+  const main = buildScene(data, NOW + 4000).agents.find(agent => agent.id === '@main')!
+  playFun(data, main, 'whip', NOW + 4000)
+  delete data.fun!.bubbles['@main']
+  expect(renderOfficeSvg(buildScene(data, NOW + 4000)).includes('data-layer="codex-wait"')).toBe(false)
+  expect(renderOfficeSvg(buildScene(data, NOW + 7000)).includes('data-layer="codex-wait"')).toBe(true)
+})
+
+test('Codex MCP hoặc CLI tiền cảnh vẫn làm việc bình thường, Claude không hóng', () => {
+  const data = backgroundCodexState()
+  delete data.codex!.runs[0]!.background
+  const scene = buildScene(data, NOW)
+  expect(scene.agents.find(agent => agent.id === 'codex')?.sleeping).toBe(false)
+  expect(scene.agents.find(agent => agent.id === '@main')?.waitingForCodex).toBe(false)
+  const svg = renderOfficeSvg(scene)
+  expect(svg.includes('dur=".8s"')).toBe(true)
+  expect(svg.includes('data-layer="codex-wait"')).toBe(false)
+})
+
+test('run đại diện quyết định ngủ, mọi run nền đang chạy đều khiến Claude hóng', () => {
+  const data = backgroundCodexState()
+  data.codex!.runs.push({ ...data.codex!.runs[0]!, id: 'mcp', background: undefined, lastAt: NOW + 1 })
+  const scene = buildScene(data, NOW)
+  expect(scene.agents.find(agent => agent.id === 'codex')?.sleeping).toBe(false)
+  expect(scene.agents.find(agent => agent.id === '@main')?.waitingForCodex).toBe(true)
+})
+
+test('run nền xong reo đúng một lần trong 4s, kể cả khi run MCP khác vẫn đang chạy', () => {
+  for (const withMcp of [false, true]) {
+    const data = backgroundCodexState()
+    if (withMcp) data.codex!.runs.push({ ...data.codex!.runs[0]!, id: 'mcp', background: undefined, lastAt: NOW + 1 })
+    updateFunStatus(data, buildScene(data, NOW).agents, NOW)
+    data.codex!.runs[0]!.status = 'completed'
+    updateFunStatus(data, buildScene(data, NOW + 1000).agents, NOW + 1000)
+    expect(data.fun!.bubbles.codex).toEqual({ text: 'Xong!', until: NOW + 5000 })
+    expect(data.fun!.bubbles['@main']).toEqual({ text: 'Xong rồi à?!', until: NOW + 5000 })
+    const svg = renderOfficeSvg(buildScene(data, NOW + 4999))
+    expect(svg.includes('>Xong!</text>')).toBe(true)
+    expect(svg.includes('>Xong rồi à?!</text>')).toBe(true)
+    updateFunStatus(data, buildScene(data, NOW + 4999).agents, NOW + 4999)
+    expect(data.fun!.bubbles.codex.until).toBe(NOW + 5000)
+    const expired = buildScene(data, NOW + 5000)
+    expect(expired.agents.find(agent => agent.id === 'codex')?.speech).toBe(undefined)
+    expect(expired.agents.find(agent => agent.id === '@main')?.speech).toBe(undefined)
+    updateFunStatus(data, expired.agents, NOW + 5000)
+    expect(data.fun!.bubbles.codex).toBe(undefined)
+    expect(data.fun!.bubbles['@main']).toBe(undefined)
+  }
+})
+
+test('roi đánh Codex ngủ tại bàn làm tỉnh và gõ phím 60s, giữ nguyên run thật', () => {
+  const data = backgroundCodexState()
+  const original = structuredClone(data.codex)
+  const codex = buildScene(data, NOW).agents.find(agent => agent.id === 'codex')!
+  playFun(data, codex, 'whip', NOW)
+  expect(data.fun!.awakeUntil.codex).toBe(NOW + 60000)
+  const awake = buildScene(data, NOW + 1)
+  const awakeCodex = awake.agents.find(agent => agent.id === 'codex')!
+  expect(awakeCodex.sleeping).toBe(false)
+  expect(awakeCodex.zone).toBe('work')
+  expect(renderOfficeSvg({ ...awake, agents: [awakeCodex] }).includes('dur=".8s"')).toBe(true)
+  expect(buildScene(data, NOW + 59999).agents.find(agent => agent.id === 'codex')?.sleeping).toBe(false)
+  expect(buildScene(data, NOW + 60000).agents.find(agent => agent.id === 'codex')?.sleeping).toBe(true)
+  expect(data.codex).toEqual(original)
+})
+
+test('tính cách ngẫu nhiên một lần, giữ qua redraw; map chỉ giữ nhân vật trong scene', () => {
+  const data = state([row('rest', 'idle')])
+  const personality = buildScene(data, NOW).agents.find(agent => agent.id === 'rest')?.personality
+  expect(['shy', 'grumpy', 'cheerful', 'dramatic', 'lazy', 'stoic'].includes(personality!)).toBe(true)
+  for (let i = 1; i <= 30; i++) {
+    expect(buildScene(data, NOW + i).agents.find(agent => agent.id === 'rest')?.personality).toBe(personality)
+  }
+  data.agents = []
+  buildScene(data, NOW + 300)
+  expect(Object.keys(data.fun!.personalities)).toEqual(['@main'])
+})
+
+test('roi chống spam 400ms, combo trong 5s, mặt hết sau 3s và đánh thức đủ 60s', () => {
+  const data = state([row('rest', 'idle')])
+  const get = (at: number) => buildScene(data, at).agents.find(agent => agent.id === 'rest')!
+  expect(get(NOW).sleeping).toBe(true)
+  data.fun!.personalities.rest = 'shy'
+  playFun(data, get(NOW), 'whip', NOW)
+  expect(data.fun!.awakeUntil.rest).toBe(NOW + 60000)
+  expect(data.fun!.bubbles.rest.text).toBe('Dạ! Em dậy rồi!')
+  playFun(data, get(NOW + 399), 'whip', NOW + 399)
+  expect(data.fun!.reactions.rest.count).toBe(1)
+  playFun(data, get(NOW + 400), 'whip', NOW + 400)
+  playFun(data, get(NOW + 800), 'whip', NOW + 800)
+  expect(data.fun!.reactions.rest.count).toBe(3)
+  expect(get(NOW + 3799).expression).toBe('shy')
+  expect(get(NOW + 3800).expression).toBe(undefined)
+  expect(get(NOW + 3800).sleeping).toBe(false)
+  expect(get(NOW + 59999).sleeping).toBe(false)
+  expect(get(NOW + 60000).sleeping).toBe(true)
+  expect(nextFunDeadline(data.fun, NOW + 60000)).toBe(undefined)
+})
+
+test('giả vờ làm 15s, báo xong 4s rồi về; hitbox không chiếm ghế thật', () => {
+  const data = state([row('rest', 'idle'), row('run')])
+  const original = buildScene(data, NOW)
+  remember(data, original)
+  const seats = structuredClone(data.officeSeats)
+  const oldBox = officeHitboxes(original).find(box => box.id === 'rest')!
+  expect(oldBox).toEqual({ id: 'rest', x: 226, y: 65, w: 24, h: 33, draggable: true })
+  expect(officeHitboxes(original).find(box => box.id === '@main')?.draggable).toBe(false)
+  playFun(data, original.agents.find(agent => agent.id === 'rest')!, 'work', NOW)
+  const working = buildScene(data, NOW + 14999)
+  expect(working.agents.find(agent => agent.id === 'rest')?.typing).toBe(true)
+  const newBox = officeHitboxes(working).find(box => box.id === 'rest')!
+  expect(newBox.x < 210).toBe(true)
+  expect(newBox.draggable).toBe(false)
+  expect(newBox.x === oldBox.x).toBe(false)
+  expect(data.officeSeats).toEqual(seats)
+  const done = buildScene(data, NOW + 15000).agents.find(agent => agent.id === 'rest')!
+  expect(done.fake).toBe(true)
+  expect(done.typing).toBe(false)
+  expect(!!done.speech).toBe(true)
+  expect(buildScene(data, NOW + 18999).agents.find(agent => agent.id === 'rest')?.fake).toBe(true)
+  expect(officeHitboxes(buildScene(data, NOW + 19000)).find(box => box.id === 'rest')).toEqual(oldBox)
+})
+
+test('bong bóng escape/cắt 18 ký tự, mọi tính cách vẽ biểu cảm và SVG rút gọn có giới hạn', () => {
+  const data = state([row('rest', 'idle')])
+  const scene = buildScene(data, NOW)
+  updateFunStatus(data, scene.agents, NOW)
+  const greeting = data.fun!.bubbles.rest
+  updateFunStatus(data, scene.agents, NOW + 10)
+  expect(data.fun!.bubbles.rest).toEqual(greeting)
+  data.fun!.bubbles.rest = { text: '<&"\'>😀1234567890123456789', until: NOW + 4000 }
+  const speech = buildScene(data, NOW).agents.find(agent => agent.id === 'rest')!
+  const svg = renderOfficeSvg(buildScene(data, NOW))
+  expect(svg.includes('&lt;&amp;&quot;&apos;&gt;😀123456789012')).toBe(true)
+  expect(svg.includes('😀1234567890123')).toBe(false)
+  for (const personality of ['shy', 'grumpy', 'cheerful', 'dramatic', 'lazy', 'stoic'] as const) {
+    speech.expression = personality
+    speech.speech = 'x'.repeat(1000)
+    const oversized = { ...scene, agents: Array.from({ length: 80 }, (_, i) => ({ ...speech, id: `a${i}` })) }
+    const art = renderOfficeSvg(oversized)
+    expect(art.length <= 131072).toBe(true)
+    expect(art.includes(`data-expression="${personality}"`)).toBe(true)
+    expect(art.includes('data-layer="whip"')).toBe(true)
+    expect(art.includes('repeatCount="1"')).toBe(true)
+  }
+})
+
+test('bong bóng mới thay bong bóng cũ kể cả sau làm giả; map giới hạn 50 và dọn mục hết hạn', () => {
+  const data = state([row('rest', 'idle')])
+  const scene = buildScene(data, NOW)
+  data.fun!.personalities.rest = 'cheerful'
+  updateFunStatus(data, scene.agents, NOW)
+  expect(data.fun!.bubbles.rest.text).toBe('Chào sếp nhé!')
+  playFun(data, scene.agents.find(agent => agent.id === 'rest')!, 'work', NOW)
+  buildScene(data, NOW + 15000)
+  expect(data.fun!.bubbles.rest.text).toBe('Xong rồi sếp!')
+  data.agents[0]!.status = 'completed'
+  updateFunStatus(data, buildScene(data, NOW + 16000).agents, NOW + 16000)
+  expect(data.fun!.bubbles.rest.text).toBe('Xong rồi sếp!')
+  expect(data.fun!.bubbles.rest.until).toBe(NOW + 20000)
+  buildScene(data, NOW + 16001)
+  expect(data.fun!.bubbles.rest.until).toBe(NOW + 20000)
+  for (const [status, text] of [['running', 'Bắt đầu nào!'], ['waiting', 'Sếp ơi?'], ['failed', 'Ối, sửa ngay!']] as const) {
+    data.agents[0]!.status = status
+    updateFunStatus(data, buildScene(data, NOW + 17000).agents, NOW + 17000)
+    expect(data.fun!.bubbles.rest.text).toBe(text)
+  }
+  data.agents = Array.from({ length: 100 }, (_, i) => row(`rest-${i}`, 'idle'))
+  updateFunStatus(data, buildScene(data, NOW + 30000).agents, NOW + 30000)
+  for (const map of Object.values(data.fun!)) {
+    expect(Object.keys(map).length <= 50).toBe(true)
+    expect(Object.hasOwn(map, 'rest')).toBe(false)
+  }
+  buildScene(data, NOW + 34000)
+  expect(Object.keys(data.fun!.bubbles).length).toBe(0)
+  expect(Object.keys(data.fun!.fakeWork).length).toBe(0)
+  expect(Object.keys(data.fun!.reactions).length).toBe(0)
+})
 
 test('cỡ văn phòng chỉ nhận số hữu hạn, snap 8px rồi kẹp giới hạn', () => {
   for (const value of [null, undefined, false, 42, '480', [], {}, { w: 480 }, { w: '480', h: 320 },
@@ -190,7 +405,8 @@ test('ba run Codex gộp thành một nhân vật, ưu tiên run đang chạy v�
   ] }
   const codex = buildScene(data, NOW).agents.filter(agent => agent.kind === 'codex')
   expect(codex.length).toBe(1)
-  expect(codex[0]).toEqual({ id: 'codex', name: 'Codex CLI', kind: 'codex', lookSeed: 'codex',
+  const { personality, fake, typing, speech, sleeping, ...realCodex } = codex[0]!
+  expect(realCodex).toEqual({ id: 'codex', name: 'Codex CLI', kind: 'codex', lookSeed: 'codex',
     status: 'running', task: 'exec · 3 lần chạy', tool: 'exec', elapsed: '1m', tools: 10,
     tokens: 400, partial: true, tick: false, firstSeen: NOW - 10000, zone: 'work', seat: 1,
     limit: { account: 'codex', fiveHourLeft: null, weekLeft: null, binding: null, share: 100 } })

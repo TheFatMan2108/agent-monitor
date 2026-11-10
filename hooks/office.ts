@@ -1,4 +1,5 @@
 import type { BackgroundKind, CodexWindow, OfficeView, OfficeSize, MonitorState, OfficeAgent, OfficeKind, OfficeScene, OfficeStatus, OfficeZone } from '../types'
+import { applyFun } from './office-fun'
 
 export type { OfficeAgent, OfficeScene } from '../types'
 
@@ -48,6 +49,8 @@ function accountLimit(state: MonitorState, account: OfficeAgent['limit']['accoun
 /** Dựng cảnh thuần dữ liệu; giữ ghế cũ và chỉ thay đổi tại các ranh giới thời gian. */
 export function buildScene(state: MonitorState, now: number): OfficeScene {
   const agents: OfficeAgent[] = []
+  const waitingForCodex = (state.codex?.runs ?? []).some(run => run.background && run.status === 'running')
+    && !state.agents.find(row => row.id === MAIN)?.active.length
   const limits = { claude: accountLimit(state, 'claude', now), codex: accountLimit(state, 'codex', now) }
   const add = (agent: Omit<OfficeAgent, 'firstSeen' | 'seat' | 'zone' | 'limit'>, firstSeen: number): void => {
     const previous = state.officeSeats?.[agent.id]
@@ -60,13 +63,14 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
     const tool = row.active.map(call => call.text).join(' | ') || 'Không có công cụ đang chạy'
     add({ id: row.id, name: row.name, task: (row.id === MAIN ? '' : row.description) || (row.active.length ? tool : LABELS[row.status]),
       kind: row.id === MAIN ? 'main' : 'subagent', status: row.status, lookSeed: row.id,
+      waitingForCodex: row.id === MAIN && waitingForCodex,
       parentSeed: row.parentId ?? MAIN, model: row.model, tool, tools: row.tools, elapsed: row.elapsed,
       tokens: row.tokens, tick: row.status === 'completed' && row.stoppedAt !== undefined
         && now >= row.stoppedAt && now - row.stoppedAt < 60000 }, row.startedAt)
   }
   if (!agents.some(agent => agent.id === MAIN)) add({
     id: MAIN, name: 'Claude Code', task: 'Chưa có hoạt động', kind: 'main', status: 'idle',
-    lookSeed: MAIN, tool: 'Không có công cụ đang chạy', tools: 0, elapsed: '<1m', tokens: 0, tick: false,
+    lookSeed: MAIN, tool: 'Không có công cụ đang chạy', tools: 0, elapsed: '<1m', tokens: 0, tick: false, waitingForCodex,
   }, 0)
   const runs = state.codex?.runs ?? []
   if (runs.length) {
@@ -89,7 +93,7 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
       id: 'codex', name: 'Codex CLI', task: (representative.lastTool || LABELS[representative.status])
         + (runs.length > 1 ? ` · ${runs.length} lần chạy` : ''),
       kind: 'codex', status: representative.status, lookSeed: 'codex', tool: representative.lastTool || 'Chưa gọi công cụ',
-      tools, partial, elapsed: representative.elapsed, tokens,
+      tools, partial, elapsed: representative.elapsed, tokens, background: representative.background,
       tick: representative.status === 'completed' && now >= representative.lastAt && now - representative.lastAt < 60000,
     }, firstSeen)
   }
@@ -146,6 +150,9 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
   const running = (state.background ?? []).filter(task => task.status === 'running')
     .sort((a, b) => a.startedAt - b.startedAt || compareId(a.id, b.id))
   const background = running.slice(0, 6).map(({ id, kind, label }) => ({ id, kind, label }))
+  const funState = Object.isFrozen(state) || (state.fun && Object.isFrozen(state.fun))
+    ? { ...state, fun: state.fun ? structuredClone(state.fun) : undefined } : state
+  applyFun(funState, agents, now)
   return { agents, interactions, overflow, background, backgroundOverflow: running.length - background.length }
 }
 
@@ -201,7 +208,7 @@ function tint(base: string, parent: string): string {
   return color
 }
 
-function character(seed: string, kind: OfficeKind, parentSeed?: string, headOnly = false, seated = false, headDown = false): string {
+function character(seed: string, kind: OfficeKind, parentSeed?: string, headOnly = false, seated = false, headDown = false, face?: OfficeAgent): string {
   const value = hash(seed)
   const style = (value >>> 9) % HAIR_STYLES.length
   const ownShirt = SHIRTS[(value >>> 13) % SHIRTS.length]
@@ -221,7 +228,17 @@ function character(seed: string, kind: OfficeKind, parentSeed?: string, headOnly
       + rect(1, 6, 1, height - 1, palette.h) + rect(14, 6, 1, height - 1, palette.h)
   }
   const eyeY = headDown ? 8 : 7
-  art += rect(4, eyeY, 2, 3, EYES, ' data-feature="eye"') + rect(10, eyeY, 2, 3, EYES, ' data-feature="eye"')
+  if (face?.sleeping) art += rect(4, 9, 3, 1, EYES) + rect(10, 9, 3, 1, EYES)
+  else if (face?.expression) {
+    const expression = face.expression
+    art += `<g data-expression="${expression}">`
+    if (expression === 'shy' || expression === 'dramatic') art += text(5, 10, '>', EYES, 6) + text(11, 10, '<', EYES, 6)
+      + rect(3, 10, 1, expression === 'dramatic' ? 5 : 3, '#75bce4') + rect(12, 10, 1, 3, '#75bce4')
+    else if (expression === 'cheerful') art += text(5, 10, '★', '#9c692a', 6) + text(11, 10, '★', '#9c692a', 6)
+    else if (expression === 'grumpy') art += text(5, 10, '>', EYES, 6) + text(11, 10, '<', EYES, 6) + text(15, 5, '♯', '#c04c41', 7)
+    else art += rect(4, 8, 3, 1, EYES) + rect(10, 8, 3, 1, EYES) + text(8, 12, expression === 'lazy' ? 'o' : '−', EYES, 4)
+    art += '</g>'
+  } else art += rect(4, eyeY, 2, 3, EYES, ' data-feature="eye"') + rect(10, eyeY, 2, 3, EYES, ' data-feature="eye"')
     + rect(4, eyeY, 1, 1, '#fff6df') + rect(10, eyeY, 1, 1, '#fff6df')
     + rect(7, 11, 2, 1, '#884f48')
   if ((value & 1) === 0) art += rect(3, 10, 2, 1, '#d9937e') + rect(11, 10, 2, 1, '#d9937e')
@@ -253,7 +270,18 @@ function text(x: number, y: number, value: string, fill = '#433c40', size = 6): 
 }
 
 function position(agent: OfficeAgent): { x: number; y: number } {
-  return (agent.zone === 'work' ? DESKS : SOFAS)[agent.seat]
+  return agent.funPosition ?? (agent.zone === 'work' ? DESKS : SOFAS)[agent.seat]
+}
+
+/** Vùng thả dùng chung, theo tọa độ canvas 320×210. */
+export const OFFICE_WORK_AREA = { x: 0, y: 0, w: 210, h: 210 } as const
+
+/** Hộp thân của từng nhân vật trên sân khấu; ghế chờ không nhận chuột. */
+export function officeHitboxes(scene: OfficeScene): Array<{ id: string; x: number; y: number; w: number; h: number; draggable: boolean }> {
+  return scene.agents.filter(agent => agent.seat >= 0).map(agent => {
+    const { x, y } = position(agent)
+    return { id: agent.id, x: x - 12, y, w: 24, h: 33, draggable: agent.zone === 'lounge' && !agent.fake }
+  })
 }
 
 const PLANT = ['...gg.g...', '..gGGggg..', '.ggGGGggg.', '..ggGGgg..', '....tt....',
@@ -327,7 +355,6 @@ function deskFront(x: number, y: number, occupied: boolean, detail: boolean): st
 
 function occupant(agent: OfficeAgent): string {
   const { x, y } = position(agent)
-  const running = agent.status === 'running'
   const resting = agent.zone === 'lounge' || agent.status === 'idle' || agent.status === 'completed' || agent.status === 'killed'
   const percent = (value: number | null): string => value === null ? 'chưa rõ' : `${value}%`
   const limit = `Limit ${agent.limit.account === 'codex' ? 'Codex' : 'Claude'}: 5 giờ ${percent(agent.limit.fiveHourLeft)} · Tuần ${percent(agent.limit.weekLeft)}`
@@ -335,17 +362,17 @@ function occupant(agent: OfficeAgent): string {
   let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]}${calls} · ${limit}</title><g>`
   if (resting) art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="3s" repeatCount="indefinite"/>'
   if (agent.status === 'failed') art += '<animateTransform attributeName="transform" type="translate" values="0 1;0 2;0 1" dur="3s" repeatCount="indefinite"/>'
-  art += `<g transform="scale(1.5)">${character(agent.lookSeed, agent.kind, agent.parentSeed, false, true, agent.status === 'failed')}</g>`
+  art += `<g transform="scale(1.5)">${character(agent.lookSeed, agent.kind, agent.parentSeed, false, true, agent.status === 'failed', agent)}</g>`
   art += '</g></g>'
   return art
 }
 
 function hands(agent: OfficeAgent): string {
-  if (agent.zone !== 'work') return ''
+  if (agent.zone !== 'work' && !agent.fake) return ''
   const { x, y } = position(agent)
   const skin = SKIN[(hash(agent.lookSeed) >>> 5) % SKIN.length]
   let art = `<g transform="translate(${x} ${y + 28})"><g>${rect(-8, 0, 5, 2, OUTLINE)}${rect(3, 0, 5, 2, OUTLINE)}${rect(-7, 0, 4, 1, skin)}${rect(3, 0, 4, 1, skin)}`
-  if (agent.status === 'running') art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0;0 -1" dur=".8s" repeatCount="indefinite" calcMode="discrete"/>'
+  if (!agent.sleeping && (agent.status === 'running' || agent.typing)) art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0;0 -1" dur=".8s" repeatCount="indefinite" calcMode="discrete"/>'
   if (agent.status === 'waiting') art += rect(10, -8, 2, 8, skin) + rect(9, -10, 3, 3, skin)
   return art + '</g></g>'
 }
@@ -370,12 +397,34 @@ function limitBar(agent: OfficeAgent): string {
 
 function statusBubble(agent: OfficeAgent): string {
   const bubble = agent.status === 'waiting' ? '?' : agent.status === 'failed' ? '!'
-    : agent.tick ? '✓' : agent.status === 'stopped' || agent.status === 'killed' ? 'z' : ''
+    : agent.tick ? '✓' : agent.sleeping ? 'z' : ''
   if (!bubble) return ''
   const { x, y } = position(agent)
   const color = agent.status === 'failed' ? '#d48678' : agent.tick ? '#a2c39a' : '#edc777'
   // Always to the left of the face, away from the right-hand laptop.
   return `<g transform="translate(${x - 26} ${y + 2})">${rect(0, 0, 12, 11, OUTLINE)}${rect(1, 1, 10, 9, color)}${rect(10, 10, 3, 3, OUTLINE)}${rect(10, 10, 2, 2, color)}${text(6, 8, bubble, '#473d3d', 8)}<animate attributeName="opacity" values="1;.7;1" dur="2s" repeatCount="indefinite"/></g>`
+}
+
+function funArt(agent: OfficeAgent): string {
+  const { x, y } = position(agent)
+  let art = ''
+  if (agent.speech) {
+    const speech = Array.from(agent.speech).slice(0, 18).join('')
+    const width = Math.min(96, Math.max(28, Array.from(speech).length * 4.8 + 8))
+    const left = Math.max(4, Math.min(316 - width, x - width / 2))
+    art += `<g data-layer="speech">${rect(left, y - 23, width, 14, OUTLINE)}${rect(left + 1, y - 22, width - 2, 12, '#fff4d9')}${rect(x - 1, y - 9, 3, 3, OUTLINE)}${text(left + width / 2, y - 13, speech, '#433c40', 5)}</g>`
+  } else if (agent.waitingForCodex && !agent.expression) {
+    const lines = ['⏳', '👀', '☕', '🤔', '📡', 'Xong chưa?']
+    const left = Math.max(4, Math.min(260, x - 28))
+    art += `<g data-layer="codex-wait">${rect(left, y - 23, 56, 14, OUTLINE)}${rect(left + 1, y - 22, 54, 12, '#fff4d9')}${rect(x - 1, y - 9, 3, 3, OUTLINE)}`
+    for (let i = 0; i < lines.length; i++) {
+      const values = Array.from({ length: 7 }, (_, step) => step % 6 === i ? '1' : '0').join(';')
+      art += `<g opacity="${i === 0 ? 1 : 0}">${text(left + 28, y - 13, lines[i], '#433c40', i === 5 ? 5 : 8)}<animate attributeName="opacity" values="${values}" keyTimes="0;0.166667;0.333333;0.5;0.666667;0.833333;1" dur="6s" calcMode="discrete" repeatCount="indefinite"/></g>`
+    }
+    art += '</g>'
+  }
+  if (agent.expression) art += `<g data-layer="whip"><path d="M ${x + 27} ${y - 7} Q ${x + 38} ${y + 15} ${x + 11} ${y + 13}" fill="none" stroke="#784b36" stroke-width="2"><animate attributeName="stroke-dasharray" values="0 100;80 0;0 100" dur=".35s" repeatCount="1"/></path>${text(x + 15, y + 12, '✷', '#f8bf4c', 15)}<animate attributeName="opacity" values="1;1;0" dur=".5s" repeatCount="1" fill="freeze"/></g>`
+  return art
 }
 
 const ROBOT = ['....aa....', '....aa....', '.oooooooo.', 'obbbbbbbbo', 'obeebbeebo', 'obbbbbbbbo',
@@ -474,7 +523,7 @@ function draw(scene: OfficeScene, detail: boolean, view: OfficeView, frame?: Off
     const seats = area === 'work' ? DESKS : SOFAS
     for (let i = 0; i < seats.length; i++) {
       const { x, y } = seats[i]
-      const agent = visible.find(item => item.zone === area && item.seat === i)
+      const agent = visible.find(item => !item.fake && item.zone === area && item.seat === i)
       art += area === 'work' ? chair(x, y) : sofa(x, y, i)
       if (agent) art += occupant(agent)
       if (area === 'work') art += deskFront(x, y, !!agent, detail)
@@ -484,7 +533,11 @@ function draw(scene: OfficeScene, detail: boolean, view: OfficeView, frame?: Off
   if (scene.overflow.work) art += rect(178, 194, 26, 11, '#f1deb5') + text(191, 202, `+${scene.overflow.work}`, '#765d4c', 8)
   if (scene.overflow.lounge) art += rect(286, 194, 26, 11, '#ecdfb9') + text(299, 202, `+${scene.overflow.lounge}`, '#597366', 8)
   art += backgroundRobots(scene)
-  for (const agent of visible) art += statusBubble(agent) + limitBar(agent)
+  for (const agent of visible.filter(item => item.fake)) {
+    const { x, y } = position(agent)
+    art += `<g data-layer="fake-work">${occupant(agent)}${rect(x - 11, y + 25, 22, 3, '#6f8586')}${hands(agent)}${nameTag(agent)}</g>`
+  }
+  for (const agent of visible) art += statusBubble(agent) + limitBar(agent) + funArt(agent)
   // Envelopes are the final layer, head-to-head, with a cheap soft dotted trail.
   for (const item of scene.interactions.slice(0, 6)) {
     const from = visible.find(agent => agent.id === item.from)

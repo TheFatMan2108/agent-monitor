@@ -2,9 +2,9 @@
 
 Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi **Claude Code**, **Codex CLI** và các subagent là những nhân vật đang làm việc, nhắn tin cho nhau, và bạn thấy luôn **mỗi bên còn bao nhiêu limit**.
 
-![Văn phòng Agent do mod vẽ](docs/preview.svg)
+![Văn phòng Agent: quất roi, đánh thức, kéo ra làm, Codex chạy nền ngủ gật và Claude ngồi hóng](docs/preview.gif)
 
-*Hình do chính mod vẽ từ dữ liệu mẫu.*
+*Mỗi khung hình do chính mod vẽ từ dữ liệu mẫu.*
 
 ## Tính năng
 
@@ -36,6 +36,14 @@ Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi *
 
 **Tương tác**
 - Dòng thời gian mới nhất lên trước: Claude giao việc cho Codex, Codex trả kết quả (xong, lỗi, hết giờ chờ MCP), subagent được tạo, agent nhắn tin cho nhau, agent kết thúc, task ngầm bắt đầu và kết thúc.
+
+## Chế độ cho vui
+
+Mỗi nhân vật có tính cách ngẫu nhiên giữ cố định trong phiên, biểu cảm và bong bóng tiếng Việt khi chào hoặc đổi trạng thái. Quất roi để xem phản ứng; đánh liên tiếp sẽ khiến phản ứng mạnh hơn, đánh người đang ngủ sẽ đánh thức họ trong 60 giây. Kéo người đang nghỉ sang khu làm việc để gõ phím giả 15 giây, báo xong 4 giây rồi trở về.
+
+Khi Claude chạy Codex CLI nền, Codex ngủ gật tại bàn còn Claude rảnh luân phiên emoji hóng kết quả; khi xong, cả hai reo trong 4 giây, chỉ thay đổi hình ảnh.
+
+Click và kéo trên hình chỉ có ở app desktop. Trên các giao diện có SVG đều có nút **Quất roi / Bắt làm** trên thẻ nhân vật, kể cả desktop để dự phòng; terminal không có chế độ này. Tất cả chỉ là hình ảnh, không gửi lệnh hoặc tin nhắn và không ảnh hưởng trạng thái hay tiến trình của agent thật.
 
 ## Cài đặt
 

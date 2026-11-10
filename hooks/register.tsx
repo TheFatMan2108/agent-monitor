@@ -4,7 +4,8 @@ import type {
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
 import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
-import { FULL_VIEW, OFFICE_ACTIONS, buildScene, moveView, officeFrame, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
+import { FULL_VIEW, OFFICE_ACTIONS, OFFICE_WORK_AREA, buildScene, moveView, officeFrame, officeHitboxes, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
+import { nextFunDeadline, playFun, updateFunStatus } from './office-fun'
 import type { OfficeAction } from './office'
 
 export { remaining } from './office'
@@ -78,26 +79,57 @@ function cap(state: MonitorState): void {
 
 // CAS bảo vệ các tool chạy đồng thời. So sánh JSON trước khi ghi để phiên rảnh
 // không redraw; shape từ phiên bản cũ được xử lý giống atom của ví dụ pane.
-async function change($: CoreEngineInterface, edit: (state: MonitorState) => void): Promise<void> {
+async function change($: CoreEngineInterface, funRuntime: FunRuntime, edit: (state: MonitorState) => void, funOnly = false): Promise<void> {
   const now = await $.clock.now()
   for (let attempt = 0; attempt < 8; attempt++) {
     const held = await $.state.get(REF)
     const before = held.value?.shape === SHAPE ? held.value.value : INITIAL
     const after = structuredClone(before)
     edit(after)
-    cap(after)
+    if (!funOnly) cap(after)
     const scene = buildScene(after, now)
-    after.officeSeats = Object.fromEntries(scene.agents.map(agent => [agent.id,
-      { zone: agent.zone, seat: agent.seat, firstSeen: agent.firstSeen }]))
-    after.officePhase = JSON.stringify([scene.interactions, scene.agents.filter(agent => agent.tick).map(agent => agent.id)])
-    if (JSON.stringify(before) === JSON.stringify(after)) return
+    updateFunStatus(after, scene.agents, now)
+    if (!funOnly) {
+      after.officeSeats = Object.fromEntries(scene.agents.map(agent => [agent.id,
+        { zone: agent.zone, seat: agent.seat, firstSeen: agent.firstSeen }]))
+      after.officePhase = JSON.stringify([scene.interactions, scene.agents.filter(agent => agent.tick).map(agent => agent.id)])
+    }
+    if (JSON.stringify(before) === JSON.stringify(after)) { await scheduleFun($, funRuntime); return }
     const written = await $.state.set(REF, { shape: SHAPE, value: after }, { ifVersion: held.version })
-    if (written.isSet) return
+    if (written.isSet) { await scheduleFun($, funRuntime); return }
   }
 }
 
 async function safely(work: () => Promise<unknown>): Promise<void> {
   try { await work() } catch { /* Telemetry không được làm hỏng tác vụ chính. */ }
+}
+
+type FunRuntime = { tick?: Timer; at?: number }
+
+async function scheduleFun($: CoreEngineInterface, runtime: FunRuntime): Promise<void> {
+  const state = await read($, monitor)
+  const now = await $.clock.now()
+  const at = nextFunDeadline(state.fun, now)
+  if (at === runtime.at) return
+  runtime.tick?.cancel()
+  runtime.at = at
+  runtime.tick = at === undefined ? undefined : $.clock.after(Math.max(0, at - now), () => {
+    runtime.at = undefined
+    runtime.tick = undefined
+    void change($, runtime, () => {}, true).catch(() => {})
+  })
+}
+
+async function play($: CoreEngineInterface, funRuntime: FunRuntime, id: string, type: 'whip' | 'work'): Promise<void> {
+  const now = await $.clock.now()
+  const current = buildScene(structuredClone(await read($, monitor)), now).agents.find(item => item.id === id)
+  if (!current || (type === 'work' && (current.zone !== 'lounge' || current.fake))) return
+  await change($, funRuntime, state => {
+    const scene = buildScene(state, now)
+    updateFunStatus(state, scene.agents, now)
+    const agent = scene.agents.find(item => item.id === id)
+    if (agent) playFun(state, agent, type, now)
+  }, true)
 }
 
 function addFeed(state: MonitorState, item: FeedItem): void {
@@ -507,7 +539,7 @@ export function parseCodexCommand(command: string): { cwd?: string } | null {
   return null
 }
 
-function codexLaunch(e: ToolCallInput): { cwd?: string } | null {
+function codexLaunch(e: ToolCallInput): Omit<CodexLaunch, 'id' | 'at'> | null {
   const tool: string = e.tool
   if (CODEX_TOOLS.has(tool)) {
     const dir = 'cd' in e && typeof e.cd === 'string' ? e.cd
@@ -515,7 +547,8 @@ function codexLaunch(e: ToolCallInput): { cwd?: string } | null {
     return dir ? { cwd: normalizePath(dir) } : {}
   }
   if ((tool === 'Bash' || tool === 'PowerShell') && 'command' in e && typeof e.command === 'string') {
-    return parseCodexCommand(e.command)
+    const launch = parseCodexCommand(e.command)
+    return launch && 'run_in_background' in e && e.run_in_background === true ? { ...launch, background: true } : launch
   }
   return null
 }
@@ -547,11 +580,12 @@ export function claimCodexRuns(
 }
 
 /** Chỉ đưa vào state các lần chạy của phiên này và bỏ đường dẫn đầy đủ. */
-function sessionRuns(runs: readonly ScannedRun[], claims: Readonly<Record<string, string>>): CodexRun[] {
+function sessionRuns(runs: readonly ScannedRun[], claims: Readonly<Record<string, string>>, launches: readonly CodexLaunch[]): CodexRun[] {
   const owned = new Set(Object.values(claims))
+  const background = new Set(launches.filter(launch => launch.background).map(launch => claims[launch.id]))
   return runs.filter(run => owned.has(run.id)).slice(0, MAX_SESSION_RUNS).map(({ cwd, startedAt, ...run }) => {
     void cwd; void startedAt
-    return run
+    return background.has(run.id) ? { ...run, background: true } : run
   })
 }
 
@@ -685,6 +719,7 @@ function orderedAgents(agents: AgentRow[]): { row: AgentRow; depth: number }[] {
 }
 
 type PollRuntime = {
+  fun: FunRuntime
   refreshing: boolean
   lastUsage: number
   lastCodex: number
@@ -700,7 +735,7 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
       await safely(async () => {
         const revision = runtime.agentsRevision
         const agents = await $.agent.list()
-        await change($, state => {
+        await change($, runtime.fun, state => {
           ensureAgent(state, MAIN, now)
           // Một tool/turn/spawn mới hơn poll luôn có quyền ưu tiên.
           for (const info of runtime.agentsRevision === revision ? agents : []) {
@@ -721,7 +756,7 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
         await safely(async () => {
           const revision = runtime.usageRevision
           const usage = await $.session.usage()
-          await change($, state => {
+          await change($, runtime.fun, state => {
             if (runtime.usageRevision === revision) {
               setUsage(state, usage.rateLimits, usage.context, now)
               state.claudeCost = finite(usage.cost?.usd) && usage.cost.usd >= 0 ? usage.cost.usd : null
@@ -744,12 +779,12 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
             const claims = held.value?.shape === SHAPE ? held.value.value.codexClaims : undefined
             if (home) scan = await readCodex($, home, now, new Set(Object.values(claims ?? {})))
           } catch { /* Mọi lỗi chỉ ẩn telemetry Codex. */ }
-          await change($, state => {
+          await change($, runtime.fun, state => {
             if (!scan) { state.codex = null; return }
             const claims = claimCodexRuns(scan.runs, state.codexLaunches ?? [], state.codexClaims ?? {})
             if (Object.keys(claims).length) state.codexClaims = claims
             else delete state.codexClaims
-            state.codex = { limits: scan.limits, runs: sessionRuns(scan.runs, claims) }
+            state.codex = { limits: scan.limits, runs: sessionRuns(scan.runs, claims, state.codexLaunches ?? []) }
           })
         })
       }
@@ -760,7 +795,9 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
 export const register: Register = (on, options) => {
   void options
   let tick: Timer | undefined
+  const funRuntime: FunRuntime = {}
   const runtime: PollRuntime = {
+    fun: funRuntime,
     refreshing: false, lastUsage: -Infinity, lastCodex: -Infinity,
     agentsRevision: 0, usageRevision: 0,
   }
@@ -771,11 +808,11 @@ export const register: Register = (on, options) => {
     })
     await safely(async () => {
       const saved = sanitizeView(await $.store.get(VIEW_KEY))
-      if (saved) await change($, state => { state.officeView = saved })
+      if (saved) await change($, funRuntime, state => { state.officeView = saved })
     })
     await safely(async () => {
       const saved = sanitizeOfficeSize(await $.store.get(SIZE_KEY))
-      if (saved) await change($, state => { state.officeSize = saved })
+      if (saved) await change($, funRuntime, state => { state.officeSize = saved })
     })
     void $.ui.open({ id: PANE, title: 'Theo dõi agent' }).catch(() => {})
     tick?.cancel()
@@ -787,7 +824,11 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     // /clear và resume giữ process sống và không phát lại session.start.
-    if (e.reason !== 'clear' && e.reason !== 'resume') tick?.cancel()
+    if (e.reason !== 'clear' && e.reason !== 'resume') {
+      tick?.cancel()
+      funRuntime.tick?.cancel()
+      funRuntime.at = undefined
+    }
     return await next(e)
   })
 
@@ -805,7 +846,7 @@ export const register: Register = (on, options) => {
     await safely(async () => {
       const now = await $.clock.now()
       startedAt = now
-      await change($, state => {
+      await change($, funRuntime, state => {
         const row = ensureAgent(state, id, now)
         row.tools++
         row.status = 'running'
@@ -827,7 +868,7 @@ export const register: Register = (on, options) => {
         const outcome = codexOutcome(value, rejected)
         const text = outcome === 'timeout' ? 'hết thời gian chờ MCP, Codex có thể vẫn đang chạy'
           : outcome === 'error' ? 'lỗi' : `xong sau ${elapsed(startedAt ?? now, now)}`
-        await change($, state => addFeed(state, { at: now, kind: 'codex', from: CODEX, to: MAIN, text }))
+        await change($, funRuntime, state => addFeed(state, { at: now, kind: 'codex', from: CODEX, to: MAIN, text }))
       })
     }
     try {
@@ -837,7 +878,7 @@ export const register: Register = (on, options) => {
         const launched = launchedBackground(e, result)
         if (!launched) return
         const now = await $.clock.now()
-        await change($, state => startBackground(state, { ...launched, toolUseId: e.tool_use_id }, now))
+        await change($, funRuntime, state => startBackground(state, { ...launched, toolUseId: e.tool_use_id }, now))
       })
       return result
     } catch (error) {
@@ -845,7 +886,7 @@ export const register: Register = (on, options) => {
       throw error
     } finally {
       runtime.agentsRevision++
-      await safely(() => change($, state => {
+      await safely(() => change($, funRuntime, state => {
         const row = state.agents.find(agent => agent.id === id)
         if (row) row.active = row.active.filter(call => call.id !== e.tool_use_id)
       }))
@@ -858,7 +899,7 @@ export const register: Register = (on, options) => {
         const notice = parseTaskNotification(e.text)
         if (!notice) return
         const now = await $.clock.now()
-        await change($, state => {
+        await change($, funRuntime, state => {
           const task = state.background?.find(item => (notice.taskId && item.taskId === notice.taskId)
             || (notice.toolUseId && item.toolUseId === notice.toolUseId))
           if (task) finishBackground(state, task, notifiedStatus(notice.status), now)
@@ -871,7 +912,7 @@ export const register: Register = (on, options) => {
   on('classic.Stop', async ($, e, next) => {
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => reconcileBackground(state, e.background_tasks, e.session_crons, now))
+      await change($, funRuntime, state => reconcileBackground(state, e.background_tasks, e.session_crons, now))
     })
     return await next(e)
   })
@@ -879,7 +920,7 @@ export const register: Register = (on, options) => {
   on('classic.SubagentStop', async ($, e, next) => {
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => reconcileBackground(state, e.background_tasks, e.session_crons, now))
+      await change($, funRuntime, state => reconcileBackground(state, e.background_tasks, e.session_crons, now))
     })
     return await next(e)
   })
@@ -888,7 +929,7 @@ export const register: Register = (on, options) => {
     runtime.agentsRevision++
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => {
+      await change($, funRuntime, state => {
         const row = ensureAgent(state, e.agentId ?? MAIN, now)
         row.status = 'running'
         delete row.stoppedAt
@@ -901,7 +942,7 @@ export const register: Register = (on, options) => {
     runtime.agentsRevision++
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => {
+      await change($, funRuntime, state => {
         const row = ensureAgent(state, e.agentId ?? MAIN, now)
         const isNewTurn = !row.turns.includes(e.turnId)
         if (isNewTurn) {
@@ -929,7 +970,7 @@ export const register: Register = (on, options) => {
     await safely(async () => {
       if ('deny' in result || !result.agentId) return
       const now = await $.clock.now()
-      await change($, state => {
+      await change($, funRuntime, state => {
         const row = ensureAgent(state, result.agentId!, now)
         row.parentId = e.parentAgentId ?? MAIN
         row.name = clean(e.name) || clean(e.subagentType)
@@ -946,7 +987,7 @@ export const register: Register = (on, options) => {
   on('session.send', async ($, e, next) => {
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => addFeed(state, {
+      await change($, funRuntime, state => addFeed(state, {
         at: now, kind: 'send', from: e.agentId ?? MAIN, to: clean(e.to), text: e.text.slice(0, 120),
       }))
     })
@@ -957,7 +998,7 @@ export const register: Register = (on, options) => {
     runtime.usageRevision++
     await safely(async () => {
       const now = await $.clock.now()
-      await change($, state => {
+      await change($, funRuntime, state => {
         setUsage(state, e.rateLimits, e.context, now)
         if (e.cost) state.claudeCost = finite(e.cost.usd) && e.cost.usd >= 0 ? e.cost.usd : null
       })
@@ -967,28 +1008,48 @@ export const register: Register = (on, options) => {
 
   on('ui.message', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     await safely(async () => {
+      if (e.element === 'office-play') {
+        if (e.surface !== 'desktop' || e.data === null || typeof e.data !== 'object' || Array.isArray(e.data)) return
+        const data = e.data as Record<string, unknown>
+        if (typeof data.id !== 'string' || (data.type !== 'whip' && data.type !== 'drop')) return
+        const state = await read($, monitor)
+        if (state.officePlayFailed) return
+        if (data.type === 'drop') {
+          const { x, y } = data
+          const area = OFFICE_WORK_AREA
+          if (typeof x !== 'number' || !Number.isFinite(x) || typeof y !== 'number' || !Number.isFinite(y)
+            || x < area.x || x >= area.x + area.w || y < area.y || y >= area.y + area.h) return
+        }
+        await play($, funRuntime, data.id, data.type === 'whip' ? 'whip' : 'work')
+        return
+      }
       if (e.element !== 'office-resize' || e.data === null || typeof e.data !== 'object') return
       const data = e.data as Record<string, unknown>
       if (data.type !== 'resize') return
       const size = sanitizeOfficeSize(data)
       if (!size) return
-      await change($, state => { state.officeSize = size })
+      await change($, funRuntime, state => { state.officeSize = size })
       if (data.done === true) await $.store.set(SIZE_KEY, size)
     })
     return await next(e)
   })
 
   on('ui.fault', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (e.element === 'office-resize') await safely(() => change($, state => { state.officeDragFailed = true }))
+    if (e.element === 'office-resize') await safely(() => change($, funRuntime, state => { state.officeDragFailed = true }))
+    if (e.element === 'office-play') await safely(() => change($, funRuntime, state => { state.officePlayFailed = true }, true))
     return await next(e)
   })
 
   on('ui.press', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.plugin === PANE && e.surface !== 'terminal') {
+      const match = /^fun:(whip|work):(.+)$/.exec(e.element)
+      if (match) await safely(() => play($, funRuntime, match[2], match[1] as 'whip' | 'work'))
+    }
     const action = e.plugin === PANE && e.element.startsWith('office:') ? e.element.slice(7) : ''
     if ((OFFICE_ACTIONS as readonly string[]).includes(action)) {
       await safely(async () => {
         let view: ReturnType<typeof moveView> | undefined
-        await change($, state => {
+        await change($, funRuntime, state => {
           view = moveView(state.officeView ?? FULL_VIEW, action as OfficeAction)
           state.officeView = view
         })
@@ -997,13 +1058,13 @@ export const register: Register = (on, options) => {
     }
     if (action === 'size-reset') {
       await safely(async () => {
-        await change($, state => { delete state.officeSize })
+        await change($, funRuntime, state => { delete state.officeSize })
         await $.store.delete(SIZE_KEY)
       })
     } else if (['narrower', 'wider', 'shorter', 'taller'].includes(action)) {
       await safely(async () => {
         let size: ReturnType<typeof sanitizeOfficeSize> = null
-        await change($, state => {
+        await change($, funRuntime, state => {
           const frame = officeFrame(state.officeView ?? FULL_VIEW, state.officeSize)
           size = sanitizeOfficeSize({
             w: frame.w + (action === 'narrower' ? -64 : action === 'wider' ? 64 : 0),
@@ -1030,7 +1091,7 @@ export const register: Register = (on, options) => {
     const Svg = 'Svg' in elements && elements.Svg({ source: '<svg/>', alt: '' }).type === 'Svg'
       ? elements.Svg : undefined
     const state = await read($, monitor)
-    const Client = e.surface === 'desktop' && !state.officeDragFailed ? (elements as ElementTable<'desktop'>).Client : undefined
+    const Client = e.surface === 'desktop' ? (elements as ElementTable<'desktop'>).Client : undefined
     const now = await $.clock.now()
     const agents = orderedAgents(state.agents)
     const backgroundRunning = (state.background ?? []).filter(task => task.status === 'running')
@@ -1080,8 +1141,13 @@ export const register: Register = (on, options) => {
             </>}
         </Box>
         {agent.kind === 'subagent' && <Button key={`view:${agent.id}`} label="Xem" onPress={() => {}} />}
+        {Svg && <Box flexDirection="column">
+          <Button key={`fun:whip:${agent.id}`} label="Quất roi" onPress={() => {}} />
+          {agent.zone === 'lounge' && !agent.fake && <Button key={`fun:work:${agent.id}`} label="Bắt làm" onPress={() => {}} />}
+        </Box>}
       </Box>
     })
+    const officeSvg = Svg && scene ? <Svg source={renderOfficeSvg(scene, view, frame)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} width={frame.w} height={frame.h} isInteractive /> : null
     return (
       <Box flexDirection="column">
         {Svg && scene && <>
@@ -1093,7 +1159,7 @@ export const register: Register = (on, options) => {
             <Button key="office:all" label="Toàn cảnh" onPress={() => {}} />
             <Button key="office:work" label="Làm việc" onPress={() => {}} />
             <Button key="office:lounge" label="Nghỉ" onPress={() => {}} />
-            {!Client && <>
+            {(!Client || state.officeDragFailed) && <>
               <Button key="office:narrower" label="Hẹp" onPress={() => {}} />
               <Button key="office:wider" label="Rộng" onPress={() => {}} />
               <Button key="office:shorter" label="Thấp" onPress={() => {}} />
@@ -1106,8 +1172,13 @@ export const register: Register = (on, options) => {
             <Button key="office:down" label="▼" onPress={() => {}} />
             <Button key="office:right" label="▶" onPress={() => {}} />
           </Box> : null}
-          {Client && <Client key="office-resize" module="./office-resize.tsx" props={{ width: frame.w, height: frame.h }} width="100%" />}
-          <Svg source={renderOfficeSvg(scene, view, frame)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} width={frame.w} height={frame.h} isInteractive />
+          {Client && !state.officeDragFailed && <Client key="office-resize" module="./office-resize.tsx" props={{ width: frame.w, height: frame.h }} width="100%" />}
+          {Client && !state.officePlayFailed ? <Box position="relative">
+            {officeSvg}
+            <Box position="absolute" top={0} left={0} width="100%" height="100%">
+              <Client key="office-play" module="./office-play.tsx" props={{ frame, view, targets: officeHitboxes(scene) }} width="100%" height="100%" />
+            </Box>
+          </Box> : officeSvg}
           {state.officeSize && <Box flexDirection="row"><Button key="office:size-reset" label="Cỡ gốc" onPress={() => {}} /></Box>}
           <Box flexDirection="row" gap={1}>
             <Box flexDirection="column" padding={1} borderStyle="round" borderColor="subtle" flexGrow={1}>
