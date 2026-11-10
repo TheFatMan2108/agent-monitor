@@ -151,6 +151,9 @@ test('giả vờ làm 15s, báo xong 4s rồi về; hitbox không chiếm ghế 
   const working = buildScene(data, NOW + 14999)
   expect(working.agents.find(agent => agent.id === 'rest')?.typing).toBe(true)
   const newBox = officeHitboxes(working).find(box => box.id === 'rest')!
+  const fake = working.agents.find(agent => agent.id === 'rest')!
+  expect(newBox).toEqual({ ...oldBox, x: fake.funPosition!.x - 12, y: fake.funPosition!.y, draggable: false })
+  expect(renderOfficeSvg(working).includes(`<g transform="translate(${newBox.x} ${newBox.y})"><title>${fake.name} ·`)).toBe(true)
   expect(newBox.x < 210).toBe(true)
   expect(newBox.draggable).toBe(false)
   expect(newBox.x === oldBox.x).toBe(false)

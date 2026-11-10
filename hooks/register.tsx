@@ -1173,11 +1173,11 @@ export const register: Register = (on, options) => {
             <Button key="office:right" label="▶" onPress={() => {}} />
           </Box> : null}
           {Client && !state.officeDragFailed && <Client key="office-resize" module="./office-resize.tsx" props={{ width: frame.w, height: frame.h }} width="100%" />}
-          {/* Svg dùng px, Box dùng ô 8×18; cố định khung để Client 100% có chiều cao. */}
-          {Client && !state.officePlayFailed ? <Box position="relative" width={frame.w / 8} height={frame.h / 18} flexDirection="column" flexShrink={0} alignSelf="flex-start" overflow="visible">
+          {/* Khung ôm Svg theo px; Client phủ đúng khung, độc lập cỡ font của host. */}
+          {Client && !state.officePlayFailed ? <Box position="relative" flexDirection="column" flexShrink={0} alignSelf="flex-start" overflow="visible">
             {officeSvg}
             <Box position="absolute" top={0} left={0} width="100%" height="100%" overflow="visible">
-              <Client key="office-play" module="./office-play.tsx" props={{ frame, view, targets: officeHitboxes(scene) }} width="100%" height="100%" />
+              <Client key="office-play" module="./office-play.tsx" props={{ frame, view, workArea: OFFICE_WORK_AREA, targets: officeHitboxes(scene) }} width="100%" height="100%" />
             </Box>
           </Box> : officeSvg}
           {Client && <Text dimColor>{state.officePlayFailed

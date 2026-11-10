@@ -3,7 +3,8 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentSpawnInput, CoreEngineInterface, EngineEventOf, On, SessionRateLimit, SessionUsage, FsEntry, ToolCallResult, ToolCallInput, Register } from 'claude-code'
 import type { CodexLaunch, MonitorState } from '../types'
 import { remaining, resetText, register, parseTaskNotification, reconcileBackground, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
-import { FULL_VIEW, buildScene, officeFrame, officeHitboxes, renderOfficeSvg } from './office'
+import { FULL_VIEW, OFFICE_WORK_AREA, buildScene, officeFrame, officeHitboxes, renderOfficeSvg } from './office'
+import officePlay from './office-play'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
 const PANE = {
@@ -14,6 +15,26 @@ const PANE = {
     scroll: { offset: 0, bodyRows: 96 }, view: {},
   },
 } as const
+
+/** Surface tối giản để kiểm tra chính xác post, không phụ thuộc xử lý message của engine. */
+function playSurface(props: Omit<Parameters<typeof officePlay>[0], 'workArea'> & { workArea?: Parameters<typeof officePlay>[0]['workArea'] }, columns: number, rows: number) {
+  type Surface = Parameters<typeof officePlay>[1]
+  let state: Surface['state']
+  let listener: Parameters<Surface['onPointer']>[0] | undefined
+  const posts: unknown[] = []
+  const surface = {
+    columns, rows, get state() { return state },
+    elements: { Box: () => null, Text: () => null },
+    setState(value: NonNullable<Surface['state']>) { state = value },
+    onPointer(value: NonNullable<typeof listener>) { listener = value },
+    post(value: unknown) { posts.push(value) },
+  } as unknown as Surface
+  officePlay({ workArea: OFFICE_WORK_AREA, ...props }, surface)
+  return { surface, posts, pointer(event: Parameters<NonNullable<typeof listener>>[0]) {
+    if (!listener) throw new Error('Thiếu pointer listener')
+    listener(event)
+  } }
+}
 
 function setup(on: On, options: {
   limits?: SessionRateLimit[]; env?: Record<string, string>; agents?: AgentInfo[]
@@ -1413,12 +1434,17 @@ test('kéo desktop snap hai trục, flush 100ms, lưu khi thả và nhận props
   expect(initialOrder[handleIndex + 2]?.type).toBe('Svg')
   const stage = initialOrder[handleIndex + 1]!
   expect(stage.props.position).toBe('relative')
-  expect(stage.props.width).toBe(480 / 8)
-  expect(stage.props.height).toBe(315 / 18)
+  expect(stage.props.width).toBe(undefined)
+  expect(stage.props.height).toBe(undefined)
+  expect(stage.props.flexDirection).toBe('column')
+  expect(stage.props.flexShrink).toBe(0)
+  expect(stage.props.alignSelf).toBe('flex-start')
   expect(stage.props.overflow).toBe('visible')
   const overlay = initialOrder[handleIndex + 3]!
   expect(overlay.type).toBe('Box')
   expect(overlay.props.position).toBe('absolute')
+  expect(overlay.props.top).toBe(0)
+  expect(overlay.props.left).toBe(0)
   expect(overlay.props.width).toBe('100%')
   expect(overlay.props.height).toBe('100%')
   expect(overlay.props.overflow).toBe('visible')
@@ -1616,24 +1642,133 @@ test('mức zoom đã lưu được dùng lại ở phiên sau, giá trị hỏn
   expect(snapshot().officeView).toEqual({ x: 40, y: 30, w: 160, h: 105 })
 })
 
-test('lớp click ước lượng từng trục chưa layout; mục tiêu không kéo được quất ngay down một lần', async ($, on) => {
+test('hit test tâm ô bù nửa ô từng trục, tối đa 4; ngoài hộp không hover tên', () => {
+  const target = { id: 'body', name: 'Nhân vật', x: 40, y: 55, w: 24, h: 33, draggable: false }
+  const props = { frame: { w: 641, h: 257 }, view: FULL_VIEW, targets: [target] }
+  // Tâm, hai biên ngang và biên trên: điểm ngoài hộp vẫn nằm trong nửa ô.
+  for (const [x, y] of [[13, 14], [9, 14], [16, 14], [13, 10]]) {
+    const play = playSurface(props, 80, 42)
+    play.pointer({ type: 'down', x, y, button: 'left' })
+    expect(play.posts).toEqual([{ type: 'whip', id: target.id }])
+    play.pointer({ type: 'up', x, y, button: 'left' })
+    play.pointer({ type: 'leave', x, y })
+    expect(play.posts.length).toBe(1)
+  }
+  // Tâm ô ngay ngoài từng cạnh quá nửa ô phải trượt.
+  for (const [x, y] of [[8, 14], [17, 14], [13, 9], [13, 18]]) {
+    const play = playSurface(props, 80, 42)
+    play.pointer({ type: 'down', x, y, button: 'left' })
+    expect(play.posts).toEqual([])
+    expect(play.surface.state?.clicks).toBe(1)
+    expect(play.surface.state?.last).toBe('trượt')
+  }
+  for (const [x, y] of [[2, 2], [1, 1]]) {
+    const play = playSurface(props, 10, 7)
+    play.pointer({ type: 'down', x, y, button: 'left' })
+    expect(play.posts).toEqual([]) // Nửa ô > 4 không được phình hitbox.
+  }
+  const play = playSurface(props, 80, 42)
+  play.pointer({ type: 'move', x: 13, y: 14 })
+  expect(play.surface.state?.hover).toBe(target.name)
+  play.pointer({ type: 'move', x: 9, y: 14 })
+  expect(play.surface.state?.hover).toBe('') // Dung sai click không mở rộng hover.
+})
+
+test('ánh xạ theo view và tâm ô, kẹp biên; nhiều hộp trúng chọn tâm gần nhất', () => {
+  const a = { id: 'a', name: 'A', x: 40, y: 55, w: 24, h: 33, draggable: false }
+  const b = { ...a, id: 'b', name: 'B', x: 48 }
+  const view = { x: 20, y: 30, w: 160, h: 105 }
+  for (const [col, id, targets] of [[16, 'a', [b, a]], [19, 'b', [a, b]]] as const) {
+    const play = playSurface({ frame: { w: 480, h: 315 }, view, targets: [...targets] }, 80, 42)
+    play.pointer({ type: 'down', x: col, y: 14, button: 'left' })
+    expect(play.posts).toEqual([{ type: 'whip', id }])
+  }
+  const props = { frame: { w: 480, h: 315 }, view,
+    targets: [{ ...a, x: view.x + view.w - 2, y: view.y + view.h - 2, w: 2, h: 2 }] }
+  const play = playSurface(props, 80, 42)
+  play.pointer({ type: 'down', x: 1000, y: 1000, button: 'left' })
+  expect(play.posts).toEqual([{ type: 'whip', id: a.id }])
+})
+
+test('surface không post khi chưa layout hoặc down trượt; draggable chỉ post đúng thao tác', () => {
+  const target = { id: 'rest', name: 'Nghỉ', x: 226, y: 65, w: 24, h: 33, draggable: true }
+  const props = { frame: { w: 480, h: 315 }, view: FULL_VIEW, targets: [target] }
+  for (const [columns, rows] of [[0, 0], [80, 0], [0, 42]]) {
+    const play = playSurface(props, columns, rows)
+    for (const type of ['down', 'move', 'up', 'leave'] as const) {
+      play.pointer({ type, x: 238, y: 81, button: 'left' })
+    }
+    expect(play.posts).toEqual([])
+    expect(play.surface.state?.clicks).toBe(0)
+  }
+  for (const gap of [10, 30]) {
+    for (const release of ['up', 'move', 'leave'] as const) {
+      const play = playSurface(props, 320, 210)
+      play.pointer({ type: 'down', x: target.x + target.w + gap, y: 81, button: 'left' })
+      play.pointer({ type: release, x: 238, y: 81, ...(release === 'up' ? { button: 'left' as const } : {}) })
+      expect(play.posts).toEqual([])
+      expect(play.surface.state?.clicks).toBe(1)
+      expect(play.surface.state?.last).toBe('trượt')
+    }
+  }
+  for (const release of ['up', 'move', 'leave'] as const) {
+    const play = playSurface(props, 320, 210)
+    play.pointer({ type: 'down', x: 238, y: 81, button: 'left' })
+    expect(play.posts).toEqual([])
+    play.pointer({ type: release, x: 238, y: 81, ...(release === 'up' ? { button: 'left' as const } : {}) })
+    expect(play.posts).toEqual([{ type: 'whip', id: target.id }])
+    play.pointer({ type: 'up', x: 238, y: 81, button: 'left' })
+    expect(play.posts.length).toBe(1)
+  }
+  for (const dropX of [100, 210, 280]) {
+    const play = playSurface(props, 320, 210)
+    play.pointer({ type: 'down', x: 238, y: 81, button: 'left' })
+    play.pointer({ type: 'move', x: dropX, y: 100, button: 'left' })
+    play.pointer({ type: 'up', x: dropX, y: 100, button: 'left' })
+    expect(play.posts).toEqual(dropX === 100 ? [{ type: 'drop', id: target.id, x: 100.5, y: 100.5 }] : [])
+  }
+})
+
+test('drop dùng workArea từ props; thiếu workArea vẫn post để register kiểm tra', () => {
+  const target = { id: 'rest', name: 'Nghỉ', x: 226, y: 65, w: 24, h: 33, draggable: true }
+  for (const workArea of [{ x: 270, y: 90, w: 20, h: 20 }, undefined]) {
+    const play = playSurface({ frame: { w: 480, h: 315 }, view: FULL_VIEW, targets: [target], workArea }, 320, 210)
+    play.pointer({ type: 'down', x: 238, y: 81, button: 'left' })
+    play.pointer({ type: 'move', x: 280, y: 100, button: 'left' })
+    play.pointer({ type: 'up', x: 280, y: 100, button: 'left' })
+    expect(play.posts).toEqual([{ type: 'drop', id: target.id, x: 280.5, y: 100.5 }])
+  }
+})
+
+test('chưa layout bỏ qua click; tâm ô trúng nhân vật không kéo thì quất ngay down một lần', async ($, on) => {
   const { clock, snapshot } = setup(on)
   await start($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  const frame = officeFrame(FULL_VIEW)
   const box = officeHitboxes(buildScene(snapshot(), NOW)).find(item => item.id === '@main')!
   expect(box.draggable).toBe(false)
-  const dimensions = [{ columns: 0, rows: 0 }, { columns: 80, rows: 0 }, { columns: 0, rows: 42 }, { columns: 80, rows: 42 }]
+  const before = structuredClone(snapshot())
+  for (const size of [{ columns: 0, rows: 0 }, { columns: 80, rows: 0 }, { columns: 0, rows: 42 }]) {
+    await ui.resize({ in: 'office-play', ...size })
+    for (const type of ['down', 'move', 'up', 'leave'] as const) {
+      await ui.pointer({ in: 'office-play', type, x: 14, y: 14, button: 'left' })
+    }
+    const diagnostic = (await ui.find({ type: 'Text', text: /^🪢/, in: 'office-play' }))!
+    expect(diagnostic.text.includes('đang đo vùng…')).toBe(true)
+    expect(diagnostic.text.includes(`vùng ${size.columns}×${size.rows}`)).toBe(true)
+    expect(diagnostic.text.includes('bấm 0')).toBe(true)
+  }
+  expect(snapshot()).toEqual(before)
+  const dimensions = [{ columns: 80, rows: 42 }, { columns: 137, rows: 59 }, { columns: 320, rows: 210 }]
   for (let i = 0; i < dimensions.length; i++) {
     const size = dimensions[i]!
     await ui.resize({ in: 'office-play', ...size })
-    const columns = size.columns || frame.w / 8
-    const rows = size.rows || frame.h / 18
+    const { columns, rows } = size
     const diagnostic = (await ui.find({ type: 'Text', text: /^🪢/, in: 'office-play' }))!
     expect(diagnostic.props.dimColor).toBe(true)
-    expect(diagnostic.text.includes(`vùng ${Math.round(columns * 10) / 10}×${Math.round(rows * 10) / 10}`)).toBe(true)
-    expect(diagnostic.text.includes('(ước lượng)')).toBe(size.columns === 0 || size.rows === 0)
+    expect(diagnostic.text.includes(`vùng ${columns}×${rows}`)).toBe(true)
+    expect(diagnostic.text.includes('(ước lượng)')).toBe(false)
+    expect(diagnostic.text.includes('đang đo vùng…')).toBe(false)
     const x = (box.x + box.w / 2) / FULL_VIEW.w * columns
     const y = (box.y + box.h / 2) / FULL_VIEW.h * rows
     const pointer = { in: 'office-play', x: Math.floor(x), y: Math.floor(y), fine: { x, y }, button: 'left' as const }
@@ -1645,7 +1780,7 @@ test('lớp click ước lượng từng trục chưa layout; mục tiêu không
     await ui.pointer({ ...pointer, type: 'leave', button: undefined })
     expect(snapshot().fun?.reactions['@main'].count).toBe(i + 1)
   }
-  expect(snapshot().fun?.reactions['@main'].count).toBe(4)
+  expect(snapshot().fun?.reactions['@main'].count).toBe(3)
   await ui.unmount()
   for (const surface of ['terminal', 'vscode', 'mobile'] as const) {
     const other = await $.ui.mount({ ...PANE, surface })
@@ -1655,7 +1790,7 @@ test('lớp click ước lượng từng trục chưa layout; mục tiêu không
   }
 })
 
-test('hover, click gần trong 40, trượt ngoài 40 và thiếu up đều có chẩn đoán, không quất lặp', async ($, on) => {
+test('hover đúng hộp, click trống cách cạnh 10/30 trượt; chỉ down trúng mới quất khi nhả', async ($, on) => {
   const { clock, snapshot } = setup(on, { agents: [
     { id: 'rest', name: 'Người nghỉ', type: 'Explore', description: '', status: 'idle' },
   ] })
@@ -1684,23 +1819,28 @@ test('hover, click gần trong 40, trượt ngoài 40 và thiếu up đều có 
   expect((await diagnostic()).includes('Click nhân vật để quất')).toBe(true)
   await pointer('down', x, 'right')
   expect((await diagnostic()).includes('bấm 0')).toBe(true)
-  // Desktop kit dùng tâm ô (x + 0.5), nên 39 thành 39.5: vẫn trong 40.
-  for (const offset of [30, 39]) {
-    await pointer('down', x + offset, 'left') // Ngoài hộp + dung sai, trong bán kính tâm.
-    expect(snapshot().fun?.reactions.rest?.count).toBe(offset === 30 ? undefined : 1)
-    await pointer('up', x + offset, 'left')
-    expect(snapshot().fun?.reactions.rest.count).toBe(offset === 30 ? 1 : 2)
-    await clock.advance(400)
-  }
-  expect(snapshot().fun?.reactions.rest.count).toBe(2)
-  expect((await diagnostic()).includes(`bấm 2 → ${box.name}`)).toBe(true)
   const beforeMiss = structuredClone(snapshot())
-  await pointer('down', x + 40.1, 'left')
-  await pointer('up', x + 40.1, 'left')
+  for (const gap of [10, 30]) {
+    const emptyX = box.x + box.w + gap
+    await pointer('move', emptyX)
+    expect((await diagnostic()).includes('Click nhân vật để quất')).toBe(true)
+    expect((await diagnostic()).includes(`🪢 ${box.name} ·`)).toBe(false)
+    await pointer('down', emptyX, 'left')
+    await pointer('up', emptyX, 'left')
+    expect((await diagnostic()).includes(`bấm ${gap === 10 ? 1 : 2} → trượt`)).toBe(true)
+  }
+  // Down trượt rồi up, move mất button hoặc leave trên nhân vật đều không quất.
+  for (const release of ['up', 'move', 'leave'] as const) {
+    await pointer('down', box.x + box.w + 10, 'left')
+    await pointer(release, x, release === 'up' ? 'left' : undefined)
+  }
   expect(snapshot()).toEqual(beforeMiss)
-  expect((await diagnostic()).includes('bấm 3 → trượt')).toBe(true)
-  await pointer('move', x + 40.1)
-  expect((await diagnostic()).includes('Click nhân vật để quất')).toBe(true)
+  expect((await diagnostic()).includes('bấm 5 → trượt')).toBe(true)
+  await pointer('down', x, 'left')
+  expect(snapshot()).toEqual(beforeMiss)
+  await pointer('up', x, 'left')
+  expect(snapshot().fun?.reactions.rest.count).toBe(1)
+  await clock.advance(400)
   for (const release of ['move', 'leave'] as const) {
     await pointer('down', x, 'left')
     const before = snapshot().fun!.reactions.rest.count
@@ -1710,8 +1850,8 @@ test('hover, click gần trong 40, trượt ngoài 40 và thiếu up đều có 
     await pointer('up', x, 'left')
     expect(snapshot().fun?.reactions.rest.count).toBe(before + 1)
   }
-  expect((await diagnostic()).includes(`bấm 5 → ${box.name}`)).toBe(true)
-  expect(snapshot().fun?.reactions.rest.count).toBe(4)
+  expect((await diagnostic()).includes(`bấm 8 → ${box.name}`)).toBe(true)
+  expect(snapshot().fun?.reactions.rest.count).toBe(3)
   await ui.unmount()
 })
 
