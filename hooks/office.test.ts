@@ -178,6 +178,67 @@ test('mọi trạng thái Codex được ánh xạ đúng khu và loại', () =>
   }
 })
 
+test('ba run Codex gộp thành một nhân vật, ưu tiên run đang chạy và cộng dồn số liệu', () => {
+  const data = state()
+  data.codex = { limits: null, runs: [
+    { id: 'done-new', folder: 'game', status: 'completed', lastTool: 'done', tools: 5,
+      tokens: 300, elapsed: '3m', lastAt: NOW },
+    { id: 'active', folder: 'game', status: 'running', lastTool: 'exec', tools: 2,
+      tokens: 100, elapsed: '1m', lastAt: NOW - 1000 },
+    { id: 'done-old', folder: 'game', status: 'completed', lastTool: '', tools: 3,
+      tokens: null, partial: true, elapsed: '2m', lastAt: NOW - 10000 },
+  ] }
+  const codex = buildScene(data, NOW).agents.filter(agent => agent.kind === 'codex')
+  expect(codex.length).toBe(1)
+  expect(codex[0]).toEqual({ id: 'codex', name: 'Codex CLI', kind: 'codex', lookSeed: 'codex',
+    status: 'running', task: 'exec · 3 lần chạy', tool: 'exec', elapsed: '1m', tools: 10,
+    tokens: 400, partial: true, tick: false, firstSeen: NOW - 10000, zone: 'work', seat: 1,
+    limit: { account: 'codex', fiveHourLeft: null, weekLeft: null, binding: null, share: 100 } })
+  remember(data, buildScene(data, NOW))
+  data.codex.runs.push({ ...data.codex.runs[1]!, id: 'new-active', lastTool: 'apply_patch',
+    lastAt: NOW + 1000, elapsed: '4m' })
+  const next = buildScene(data, NOW + 1000).agents.find(agent => agent.id === 'codex')!
+  expect(next.tool).toBe('apply_patch')
+  expect(next.elapsed).toBe('4m')
+  expect(next.firstSeen).toBe(NOW - 10000)
+  expect(next.lookSeed).toBe(codex[0]!.lookSeed)
+  data.codex.runs = [data.codex.runs[3]!]
+  expect(buildScene(data, NOW + 2000).agents.find(agent => agent.id === 'codex')?.firstSeen).toBe(NOW - 10000)
+})
+
+test('mọi run Codex xong chỉ còn một nhân vật nghỉ, tick theo run mới nhất và đúng mốc 60 giây', () => {
+  const data = state()
+  data.codex = { limits: null, runs: [0, 1000, 2000].map((age, i) => ({
+    id: String(i), folder: 'game', status: 'completed', lastTool: '', tools: i,
+    tokens: null, elapsed: `${i + 1}m`, lastAt: NOW - age,
+  })) }
+  const scene = buildScene(data, NOW)
+  const codex = scene.agents.filter(agent => agent.kind === 'codex')
+  expect(codex.length).toBe(1)
+  expect(codex[0]?.zone).toBe('lounge')
+  expect(codex[0]?.status).toBe('completed')
+  expect(codex[0]?.task).toBe('Hoàn tất · 3 lần chạy')
+  expect(codex[0]?.elapsed).toBe('1m')
+  expect(codex[0]?.tokens).toBe(null)
+  expect(codex[0]?.partial).toBe(false)
+  expect(codex[0]?.limit.share).toBe(null)
+  expect(codex[0]?.tick).toBe(true)
+  expect(buildScene(data, NOW - 1).agents.find(agent => agent.id === 'codex')?.tick).toBe(false)
+  expect(buildScene(data, NOW + 59999).agents.find(agent => agent.id === 'codex')?.tick).toBe(true)
+  expect(buildScene(data, NOW + 60000).agents.find(agent => agent.id === 'codex')?.tick).toBe(false)
+  data.codex.runs[0]!.status = 'stopped'
+  expect(buildScene(data, NOW).agents.find(agent => agent.id === 'codex')?.tick).toBe(false)
+  data.codex.runs[0]!.tokens = 0
+  expect(buildScene(data, NOW).agents.find(agent => agent.id === 'codex')?.tokens).toBe(0)
+})
+
+test('không có run thì không tạo nhân vật Codex kể cả khi có limit', () => {
+  const data = state()
+  expect(buildScene(data, NOW).agents.some(agent => agent.kind === 'codex')).toBe(false)
+  data.codex = { limits: { updatedAt: NOW, plan: 'plus', reached: false, primary: null, secondary: null }, runs: [] }
+  expect(buildScene(data, NOW).agents.some(agent => agent.kind === 'codex')).toBe(false)
+})
+
 test('ghế theo firstSeen/id, không đổi khi đảo danh sách, thêm/xóa người hoặc đổi ưu tiên cùng khu', () => {
   const data = state([row('b'), row('a'), row('c', 'idle')])
   const first = buildScene(data, NOW)
@@ -238,7 +299,7 @@ test('tương tác dưới 12 giây, đúng người trên sân khấu, tối đ
   ]
   const scene = buildScene(data, NOW)
   expect(scene.interactions.length).toBe(6)
-  expect(scene.interactions[0]).toEqual({ from: '@main', to: 'codex:run', kind: 'codex' })
+  expect(scene.interactions[0]).toEqual({ from: '@main', to: 'codex', kind: 'codex' })
   expect(scene.interactions[1]).toEqual({ from: '@main', to: 'a', kind: 'spawn' })
   expect((renderOfficeSvg(scene).match(/<animateMotion /g) ?? []).length).toBe(6)
   data.feed = [{ at: NOW, kind: 'send', from: '@main', to: 'a', text: '' }]
@@ -333,10 +394,8 @@ test('limit theo tài khoản, không chia quota theo agent; token share chỉ t
     expect(scene.agents.find(agent => agent.id === id)?.limit)
       .toEqual({ account: 'claude', fiveHourLeft: 76, weekLeft: 96, binding: 76, share })
   }
-  for (const [id, share] of [['codex:0', 25], ['codex:1', 75], ['codex:2', null]] as const) {
-    expect(scene.agents.find(agent => agent.id === id)?.limit)
-      .toEqual({ account: 'codex', fiveHourLeft: 86, weekLeft: 39, binding: 39, share })
-  }
+  expect(scene.agents.find(agent => agent.id === 'codex')?.limit)
+    .toEqual({ account: 'codex', fiveHourLeft: 86, weekLeft: 39, binding: 39, share: 100 })
   // Agent tràn ghế vẫn có card, được tính trong mẫu số; agent rời scene thì không.
   const data = accountState()
   data.agents.push({ ...row('old', 'completed'), stoppedAt: NOW - 300000, tokens: 900 })
@@ -371,7 +430,7 @@ test('cửa sổ Codex hết hạn tại reset hoặc có expired trả null, SV
       resetsAt: NOW / 1000 + (expired ? 3600 : 0), expired }
     let scene = buildScene(data, NOW)
     expect(scene.agents.find(agent => agent.kind === 'codex')!.limit)
-      .toEqual({ account: 'codex', fiveHourLeft: null, weekLeft: 39, binding: 39, share: 25 })
+      .toEqual({ account: 'codex', fiveHourLeft: null, weekLeft: 39, binding: 39, share: 100 })
     expect(renderOfficeSvg(scene).includes('Limit Codex: 5 giờ chưa rõ · Tuần 39%')).toBe(true)
     expect(renderOfficeSvg(scene).includes('86%')).toBe(false)
     data.codex!.limits!.primary!.expired = true
@@ -399,7 +458,8 @@ test('bar 18×4, pixel nguyên, ngưỡng màu tại 20 và 5; không rõ là ba
 })
 
 test('bar nằm trên đầu, không đụng bubble, bảng tên hoặc hàng trước trong cả hai khu', () => {
-  const data = state(Array.from({ length: 5 }, (_, i) => row(`waiting-${i}`, 'waiting')))
+  const data = state([...Array.from({ length: 5 }, (_, i) => row(`waiting-${i}`, 'waiting')),
+    ...Array.from({ length: 5 }, (_, i) => row(`idle-${i}`, 'idle'))])
   data.codex = { limits: null, runs: Array.from({ length: 6 }, (_, i) => ({
     id: String(i), folder: 'game', status: 'stopped', lastTool: '', tools: 0,
     tokens: null, elapsed: '<1m', lastAt: NOW,

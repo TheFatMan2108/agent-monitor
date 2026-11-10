@@ -980,9 +980,10 @@ test('card desktop hiển thị limit đúng tài khoản, share token riêng v�
   const line = await ui.find({ type: 'Text', text: /^Limit Codex ·/ })
   expect(line?.text).toBe('Limit Codex · 5 giờ [████░░░░░░] 40% · Tuần [█░░░░░░░░░] 6%')
   expect(line?.props.color).toBe('warning')
-  expect((await ui.find({ key: 'card:codex:0' }))?.text.includes('Agent này chiếm 25% token của tài khoản trong các agent đang theo dõi')).toBe(true)
+  expect((await ui.find({ key: 'card:codex' }))?.text.includes('Agent này chiếm 100% token của tài khoản trong các agent đang theo dõi')).toBe(true)
+  expect((await ui.findAll({ type: 'Box' })).filter(box => box.key === 'card:codex').length).toBe(1)
+  expect((await ui.find({ key: 'card:codex' }))?.text.includes('apply_patch · 2 lần chạy')).toBe(true)
   expect((await ui.find({ key: 'card:idle' }))?.text.includes(' · 5 giờ 76% · Tuần 96%')).toBe(true)
-  expect((await ui.find({ key: 'card:codex:1' }))?.text.endsWith(' · 5 giờ 40% · Tuần 6%')).toBe(true)
   const note = await ui.find({ type: 'Text', text: /^Limit tính theo tài khoản:/ })
   expect(note?.text).toBe('Limit tính theo tài khoản: các agent cùng tài khoản dùng chung một hạn mức.')
   expect(note?.props.dimColor).toBe(true)
@@ -992,6 +993,12 @@ test('card desktop hiển thị limit đúng tài khoản, share token riêng v�
   expect((await ui.find({ type: 'Text', text: /^5 giờ \[/ }))?.text)
     .toBe('5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset')
   await ui.unmount()
+  for (const run of data.codex.runs) run.status = 'completed'
+  seed(data)
+  const resting = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await resting.findAll({ type: 'Box' })).filter(box => box.key === 'card:codex').length).toBe(1)
+  expect((await resting.find({ key: 'card:codex' }))?.text.endsWith(' · 5 giờ 40% · Tuần 6%')).toBe(true)
+  await resting.unmount()
 })
 
 test('card màu đúng ngưỡng 20/5 và ẩn phần trăm Codex hết hạn, không rõ không bịa quota', async ($, on) => {
@@ -1010,23 +1017,34 @@ test('card màu đúng ngưỡng 20/5 và ẩn phần trăm Codex hết hạn, k
     const line = await ui.find({ type: 'Text', text: /^Limit Codex ·/ })
     expect(line?.props.color).toBe(color)
     expect(line?.text).toBe(`Limit Codex · 5 giờ [${'█'.repeat(Math.round(left / 10))}${'░'.repeat(10 - Math.round(left / 10))}] ${left}% · Tuần chưa rõ`)
-    const compact = (await ui.findAll({ type: 'Text' })).find(item => item.text === ` · 5 giờ ${left}% · Tuần chưa rõ`)
-    expect(compact?.props.color).toBe(color)
     await ui.unmount()
+    for (const run of data.codex.runs) run.status = 'stopped'
+    seed(structuredClone(data))
+    const resting = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const compact = (await resting.findAll({ type: 'Text' })).find(item => item.text === ` · 5 giờ ${left}% · Tuần chưa rõ`)
+    expect(compact?.text).toBe(` · 5 giờ ${left}% · Tuần chưa rõ`)
+    expect(compact?.props.color).toBe(color)
+    await resting.unmount()
+    data.codex.runs[0]!.status = 'running'
   }
   for (const expired of [false, true]) {
     data.codex.limits!.primary = { windowMinutes: 300, usedPercent: 14, expired,
       resetsAt: NOW / 1000 + (expired ? 3600 : 0) }
     seed(structuredClone(data))
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-    const card = await ui.find({ key: 'card:codex:0' })
+    const card = await ui.find({ key: 'card:codex' })
     expect(card?.text.includes('Limit Codex · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
     expect(card?.text.includes('86%')).toBe(false)
     expect(card?.text.includes('Agent này chiếm')).toBe(false)
     expect((await ui.find({ type: 'Text', text: /^Limit Codex ·/ }))?.props.color).toBe(undefined)
-    expect((await ui.find({ key: 'card:codex:1' }))?.text.endsWith(' · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
     expect((await ui.find({ key: 'card:@main' }))?.text.includes('Limit Claude · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
     await ui.unmount()
+    for (const run of data.codex.runs) run.status = 'stopped'
+    seed(structuredClone(data))
+    const resting = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect((await resting.find({ key: 'card:codex' }))?.text.endsWith(' · 5 giờ chưa rõ · Tuần chưa rõ')).toBe(true)
+    await resting.unmount()
+    data.codex.runs[0]!.status = 'running'
   }
 })
 
@@ -1119,7 +1137,7 @@ test('chỉ hiện Codex do phiên này gọi; phiên khác và limit tài kho�
   const empty = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect((await empty.find({ type: 'Text', text: 'Chưa có lần gọi Codex trong phiên này' }))?.text).toBe('Chưa có lần gọi Codex trong phiên này')
   expect((await empty.find({ type: 'Text', text: 'Codex CLI · plus' }))?.text).toBe('Codex CLI · plus')
-  expect(await empty.find({ key: 'card:codex:C:/codex-scope-test/sessions/2026/11/09/rollout-mine.jsonl' })).toBe(undefined)
+  expect(await empty.find({ key: 'card:codex' })).toBe(undefined)
   await empty.unmount()
   await $.tool.call({ tool: 'Bash', command: "codex exec -C 'F:\\Work\\Game' hi", agentId: 'child', tool_use_id: 'launch-1' })
   await clock.advance(15000)

@@ -68,12 +68,31 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
     id: MAIN, name: 'Claude Code', task: 'Chưa có hoạt động', kind: 'main', status: 'idle',
     lookSeed: MAIN, tool: 'Không có công cụ đang chạy', tools: 0, elapsed: '<1m', tokens: 0, tick: false,
   }, 0)
-  for (const run of state.codex?.runs ?? []) add({
-    id: `codex:${run.id}`, name: 'Codex CLI', task: run.lastTool || LABELS[run.status],
-    kind: 'codex', status: run.status, lookSeed: `codex:${run.id}`, tool: run.lastTool || 'Chưa gọi công cụ',
-    tools: run.tools, partial: run.partial, elapsed: run.elapsed, tokens: run.tokens,
-    tick: run.status === 'completed' && now >= run.lastAt && now - run.lastAt < 60000,
-  }, now)
+  const runs = state.codex?.runs ?? []
+  if (runs.length) {
+    let representative = runs[0]!
+    let firstSeen = representative.lastAt
+    let tools = 0
+    let tokens: number | null = null
+    let partial = false
+    for (const run of runs) {
+      if ((run.status === 'running' && representative.status !== 'running')
+        || ((run.status === 'running') === (representative.status === 'running') && run.lastAt > representative.lastAt)) {
+        representative = run
+      }
+      firstSeen = Math.min(firstSeen, run.lastAt)
+      tools += run.tools
+      if (run.tokens !== null) tokens = (tokens ?? 0) + run.tokens
+      partial ||= !!run.partial
+    }
+    add({
+      id: 'codex', name: 'Codex CLI', task: (representative.lastTool || LABELS[representative.status])
+        + (runs.length > 1 ? ` · ${runs.length} lần chạy` : ''),
+      kind: 'codex', status: representative.status, lookSeed: 'codex', tool: representative.lastTool || 'Chưa gọi công cụ',
+      tools, partial, elapsed: representative.elapsed, tokens,
+      tick: representative.status === 'completed' && now >= representative.lastAt && now - representative.lastAt < 60000,
+    }, firstSeen)
+  }
   // Bao gồm mọi agent có card trong scene, cả những người đang chờ ghế.
   const tokens = { claude: 0, codex: 0 }
   for (const agent of agents) tokens[agent.limit.account] += agent.tokens ?? 0
@@ -113,8 +132,7 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
   agents.sort((a, b) => compareId(a.id, b.id))
   const onStage = agents.filter(agent => agent.seat >= 0)
   const address = (id: string): string | undefined => {
-    if (id === '@codex') return onStage.filter(agent => agent.kind === 'codex')
-      .sort((a, b) => priority(a) - priority(b) || compareId(a.id, b.id))[0]?.id
+    if (id === '@codex') return onStage.find(agent => agent.id === 'codex')?.id
     return onStage.find(agent => agent.id === id || agent.name === id)?.id
   }
   const interactions: OfficeScene['interactions'] = []
