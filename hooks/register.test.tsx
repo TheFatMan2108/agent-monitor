@@ -340,9 +340,76 @@ test('poll phát hiện hoàn tất và lồng agent theo parent; nút xem xử 
   await ui.press({ key: 'view:a2' })
   expect(viewed).toBe('a2')
   expect(toast).toBe('Không thể chuyển góc xem: Không xem được')
+  expect(await ui.find({ key: 'view:a2' })).toBeDefined()
+  expect(await ui.find({ key: 'main' })).toBeDefined()
   await ui.press({ key: 'main' })
   expect(viewed).toBe(undefined)
   await ui.unmount()
+})
+
+test('deny không có main view ẩn nút ngay trên surface đó, giữ nút trên surface khác', async ($, on) => {
+  const { clock } = setup(on, { agents: [
+    { id: 'a1', name: 'scout', type: 'Explore', description: 'Khảo sát', status: 'running' },
+    { id: 'a2', name: 'helper', type: 'Explore', description: 'Hỗ trợ', status: 'idle' },
+  ] })
+  const toasts: string[] = []
+  on('ui.view', () => ({ value: { deny: 'no main view here' } }))
+  on('ui.toast', (_, e) => { toasts.push(e.text); return { value: undefined } })
+  await start($)
+  await clock.settle()
+  const props = { ...PANE.props, view: { agentId: 'a1' } }
+  const other = await $.ui.mount({ ...PANE, surface: 'vscode', props })
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface, props })
+    expect(await ui.find({ key: 'view:a1' })).toBeDefined()
+    expect(await ui.find({ key: 'view:a2' })).toBeDefined()
+    expect(await ui.find({ key: 'main' })).toBeDefined()
+    await ui.press({ key: surface === 'desktop' ? 'view:a1' : 'main' })
+    expect(toasts.length).toBe(surface === 'desktop' ? 1 : 2)
+    expect(toasts[toasts.length - 1]).toBe('Góc xem agent chỉ dùng được trong terminal (claude CLI)')
+    expect(await ui.find({ key: 'view:a1' })).toBe(undefined)
+    expect(await ui.find({ key: 'view:a2' })).toBe(undefined)
+    expect(await ui.find({ key: 'main' })).toBe(undefined)
+    await ui.redraw()
+    expect(await ui.find({ key: 'view:a1' })).toBe(undefined)
+    expect(await ui.find({ key: 'main' })).toBe(undefined)
+    expect(await other.find({ key: 'view:a1' })).toBeDefined()
+    expect(await other.find({ key: 'view:a2' })).toBeDefined()
+    expect(await other.find({ key: 'main' })).toBeDefined()
+    await ui.unmount()
+  }
+  await other.unmount()
+})
+
+test('deny không có main view chỉ toast và invalidate một lần mỗi surface, kể cả thiếu surface', async () => {
+  type Press = EngineEventOf['ui.press']
+  type PressHook = ($: CoreEngineInterface, e: Press, next: (e: Press) => Promise<{}>) => Promise<unknown>
+  let pressHook: PressHook | undefined
+  register(((event: string, matcher: unknown, handler: unknown) => {
+    if (event === 'ui.press') pressHook = handler as PressHook
+  }) as unknown as On, {} as Parameters<Register>[1])
+  const toasts: string[] = []
+  const invalidations: string[] = []
+  const api = { ui: {
+    view: async () => ({ deny: 'no main view here' }),
+    invalidate: async (event: string) => { invalidations.push(event) },
+    toast: (text: string) => { toasts.push(text) },
+  } } as unknown as CoreEngineInterface
+  for (const surface of ['desktop', 'terminal', undefined] as const) {
+    const event = { plugin: PANE.plugin, component: PANE.component, requestId: PANE.requestId,
+      element: 'view:a1', ...(surface === undefined ? {} : { surface }) } as Press
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let continued = false
+      await pressHook!(api, event, async received => {
+        expect(received).toBe(event)
+        continued = true
+        return {}
+      })
+      expect(continued).toBe(true)
+    }
+  }
+  expect(toasts).toEqual(Array(3).fill('Góc xem agent chỉ dùng được trong terminal (claude CLI)'))
+  expect(invalidations).toEqual(['ui.render', 'ui.render', 'ui.render'])
 })
 
 test('poll rảnh không ghi atom và dữ liệu usage có cadence 15 giây', async ($, on) => {

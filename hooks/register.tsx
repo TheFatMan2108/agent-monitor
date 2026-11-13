@@ -796,6 +796,7 @@ export const register: Register = (on, options) => {
   void options
   let tick: Timer | undefined
   const funRuntime: FunRuntime = {}
+  const unavailableViews = new Set<string | undefined>()
   const runtime: PollRuntime = {
     fun: funRuntime,
     refreshing: false, lastUsage: -Infinity, lastCodex: -Infinity,
@@ -1078,7 +1079,15 @@ export const register: Register = (on, options) => {
     if (e.plugin === PANE && (e.element === 'main' || e.element.startsWith('view:'))) {
       await safely(async () => {
         const result = await $.ui.view(e.element === 'main' ? {} : { agentId: e.element.slice(5) })
-        if ('deny' in result) $.ui.toast(`Không thể chuyển góc xem: ${result.deny}`)
+        if ('deny' in result) {
+          if (result.deny === 'no main view here') {
+            if (!unavailableViews.has(e.surface)) {
+              unavailableViews.add(e.surface)
+              await $.ui.invalidate('ui.render')
+              $.ui.toast('Góc xem agent chỉ dùng được trong terminal (claude CLI)')
+            }
+          } else $.ui.toast(`Không thể chuyển góc xem: ${result.deny}`)
+        }
       })
     }
     return await next(e)
@@ -1087,6 +1096,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
+    const canView = !unavailableViews.has(undefined) && !unavailableViews.has(e.surface)
     // Engine bổ sung constructor Fragment cho phần tử surface không hỗ trợ.
     const Svg = 'Svg' in elements && elements.Svg({ source: '<svg/>', alt: '' }).type === 'Svg'
       ? elements.Svg : undefined
@@ -1140,7 +1150,7 @@ export const register: Register = (on, options) => {
               {Svg && agent.status === 'running' && <Box marginTop={1}><Svg source={activityBar} alt="Đang xử lý, chưa có số liệu tiến độ" width={240} height={4} /></Box>}
             </>}
         </Box>
-        {agent.kind === 'subagent' && <Button key={`view:${agent.id}`} label="Xem" onPress={() => {}} />}
+        {canView && agent.kind === 'subagent' && <Button key={`view:${agent.id}`} label="Xem" onPress={() => {}} />}
         {Svg && <Box flexDirection="column">
           <Button key={`fun:whip:${agent.id}`} label="Quất roi" onPress={() => {}} />
           {agent.zone === 'lounge' && !agent.fake && <Button key={`fun:work:${agent.id}`} label="Bắt làm" onPress={() => {}} />}
@@ -1238,7 +1248,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Box>
               <Text>{'  '.repeat(Math.min(depth, 12))}{STATUS[row.status]} · {row.name} · {row.description}</Text>
-              {row.id !== MAIN && <Button key={`view:${row.id}`} label="Xem" onPress={() => {}} />}
+              {canView && row.id !== MAIN && <Button key={`view:${row.id}`} label="Xem" onPress={() => {}} />}
             </Box>
             <Text dimColor>{'  '.repeat(Math.min(depth, 12))}{row.active.length ? row.active.map(call => call.text).join(' | ') : 'Không có công cụ đang chạy'} · {row.tools} lần gọi · {row.elapsed} · {compact(row.tokens)} token</Text>
           </Box>
@@ -1249,7 +1259,7 @@ export const register: Register = (on, options) => {
           {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools}{run.partial ? '+' : ''} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
         </Text>)}
         </>}
-        {e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}
+        {canView && e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}
         <Text bold>Task ngầm · {backgroundRunning.length}</Text>
         {backgroundShown.length === 0 && <Text dimColor>Không có task ngầm</Text>}
         {backgroundShown.map(task => <Text dimColor={task.status !== 'running'} color={task.status === 'failed' ? 'error' : undefined}>
