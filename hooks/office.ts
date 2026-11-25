@@ -110,6 +110,11 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
       elapsed: minutes === 0 ? '<1m' : `${Math.floor(minutes / 60)}h ${minutes % 60}m`,
       tick: status === 'completed' && endedAt !== undefined && now >= endedAt && now - endedAt < 60000,
     }, cli.firstSeen)
+  } else {
+    add({
+      id: '@claude-cli', name: 'Claude CLI', task: 'Chưa được giao việc', kind: 'claude-cli', lookSeed: '@claude-cli',
+      status: 'idle', tool: 'Không có công cụ đang chạy', tools: 0, tokens: null, elapsed: '<1m', tick: false,
+    }, 0)
   }
   // Bao gồm mọi agent có card trong scene, cả những người đang chờ ghế.
   const tokens = { claude: 0, codex: 0 }
@@ -120,12 +125,17 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
   }
   const overflow = { work: 0, lounge: 0 }
   for (const area of ['work', 'lounge'] as const) {
-    const candidates = agents.filter(agent => agent.zone === area)
+    const idleCli = area === 'lounge' && !cli ? agents.find(agent => agent.kind === 'claude-cli') : undefined
+    const candidates = agents.filter(agent => agent.zone === area && agent !== idleCli)
     // Chọn người theo ưu tiên trước, rồi giữ ghế của những người còn trên sân khấu.
     const chosen = candidates.slice().sort((a, b) => priority(a) - priority(b)
       || (priority(a) === 4 ? b.firstSeen - a.firstSeen : a.firstSeen - b.firstSeen)
       || compareId(a.id, b.id)).slice(0, CAPACITY[area])
     overflow[area] = candidates.length - chosen.length
+    if (idleCli && chosen.length === CAPACITY.lounge) {
+      chosen.splice(chosen.findLastIndex(agent => agent.kind !== 'codex'), 1)
+      overflow.lounge++
+    }
     const occupied = new Set<number>()
     if (area === 'work') {
       const main = chosen.find(agent => agent.kind === 'main')
@@ -145,6 +155,12 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
       while (occupied.has(seat)) seat++
       agent.seat = seat
       occupied.add(seat)
+    }
+    if (idleCli) {
+      const oldSeat = state.officeSeats?.[idleCli.id]?.seat ?? -1
+      let seat = oldSeat >= 0 && oldSeat < CAPACITY.lounge && !occupied.has(oldSeat) ? oldSeat : CAPACITY.lounge - 1
+      while (occupied.has(seat)) seat--
+      idleCli.seat = seat
     }
   }
   agents.sort((a, b) => compareId(a.id, b.id))

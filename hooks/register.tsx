@@ -1157,18 +1157,18 @@ export const register: Register = (on, options) => {
       ? 2 + Number(!!state.codex.limits.primary) + Number(!!state.codex.limits.secondary) + Number(state.codex.limits.reached) : 2
     const baseRows = 10 + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
       + (e.props.view.agentId ? 1 : 0) + 1 + Math.max(1, backgroundShown.length) + (scheduled.length ? 1 + scheduled.length : 0)
-      + (state.claudeCli ? (Svg ? 2 : 3) : 0)
+      + (Svg ? 2 : 3)
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
-    const scene = Svg || state.claudeCli ? buildScene(state, now) : undefined
+    const scene = buildScene(state, now)
     const view = state.officeView ?? FULL_VIEW
     const frame = officeFrame(view, state.officeSize)
-    const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
-    const resting = scene?.agents.filter(agent => agent.zone === 'lounge') ?? []
+    const working = scene.agents.filter(agent => agent.zone === 'work')
+    const resting = scene.agents.filter(agent => agent.zone === 'lounge')
     const main = state.agents.find(agent => agent.id === MAIN)
     const totalTokens = state.agents.reduce((sum, row) => sum + row.tokens, 0)
       + (state.codex?.runs.reduce((sum, run) => sum + (run.tokens ?? 0), 0) ?? 0)
     const activityBar = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="4" viewBox="0 0 240 4"><rect width="240" height="4" fill="#e7ddc6"/><rect width="48" height="4" fill="#79a49b"><animate attributeName="x" values="-48;240" dur="2s" repeatCount="indefinite"/></rect></svg>'
-    const cards = (rows: NonNullable<typeof scene>['agents'], small: boolean) => rows.map(agent => {
+    const cards = (rows: typeof scene.agents, small: boolean) => rows.map(agent => {
       const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
         : agent.kind === 'claude-cli' ? 'Claude CLI' : 'Agent con Claude'
       const name = agent.name === type ? '' : ` · ${agent.name}`
@@ -1198,10 +1198,17 @@ export const register: Register = (on, options) => {
         </Box>}
       </Box>
     })
-    const officeSvg = Svg && scene ? <Svg source={renderOfficeSvg(scene, view, frame)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} width={frame.w} height={frame.h} isInteractive /> : null
+    const officeSvg = Svg ? <Svg source={renderOfficeSvg(scene, view, frame)} alt={`Văn phòng: ${working.length} agent đang làm, ${resting.length} agent đang nghỉ`} width={frame.w} height={frame.h} isInteractive /> : null
+    const claudeLimitRow = (limit: MonitorState['limits'][number]) => {
+      const left = remaining(limit.percentUsed)
+      const filled = Math.round(left / 10)
+      return <Text color={left < 5 ? 'error' : left < 20 ? 'warning' : undefined}>
+        {limitLabel(limit.kind)} [{ '█'.repeat(filled) + '░'.repeat(10 - filled) }] {left}% còn lại · {limit.reset}
+      </Text>
+    }
     return (
       <Box flexDirection="column">
-        {Svg && scene && <>
+        {Svg && <>
           <Text bold size="heading">Văn phòng Agent</Text>
           <Box flexDirection="row" gap={1} flexWrap="wrap">
             <Button key="office:out" label="−" onPress={() => {}} />
@@ -1251,14 +1258,14 @@ export const register: Register = (on, options) => {
         <Text bold>Limit còn lại</Text>
         <Text bold>Claude Code</Text>
         {state.limits.length === 0 && <Text dimColor>{EMPTY_LIMITS}</Text>}
-        {state.limits.map(limit => {
-          const left = remaining(limit.percentUsed)
-          const filled = Math.round(left / 10)
-          return <Text color={left < 5 ? 'error' : left < 20 ? 'warning' : undefined}>
-            {limitLabel(limit.kind)} [{ '█'.repeat(filled) + '░'.repeat(10 - filled) }] {left}% còn lại · {limit.reset}
-          </Text>
-        })}
+        {state.limits.map(claudeLimitRow)}
         <Text>Context phiên này: {state.contextRemaining === null ? 'Chưa có dữ liệu' : `${state.contextRemaining}% còn lại`}</Text>
+        <Text bold>Claude CLI</Text>
+        {['five_hour', 'seven_day'].map(kind => {
+          const limit = state.limits.find(item => item.kind === kind)
+          return limit ? claudeLimitRow(limit) : <Text dimColor>{limitLabel(kind)} · Chưa có dữ liệu</Text>
+        })}
+        <Text dimColor>Dùng chung limit tài khoản Claude với Claude Code</Text>
         <Text bold>Codex CLI{state.codex?.limits?.plan ? ` · ${state.codex.limits.plan}` : ''}</Text>
         {!state.codex?.limits && <Text dimColor>Chưa có dữ liệu limit Codex</Text>}
         {state.codex?.limits && <Box flexDirection="column">
@@ -1273,7 +1280,7 @@ export const register: Register = (on, options) => {
           {state.codex.limits.reached && <Text color="warning">Đã chạm limit</Text>}
           <Text dimColor>Cập nhật lúc {clockText(state.codex.limits.updatedAt)} (theo lần gọi Codex gần nhất)</Text>
         </Box>}
-        <Text dimColor>Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.</Text>
+        <Text dimColor>Limit tính theo tài khoản; Claude CLI và các agent con của Claude dùng chung limit Claude.</Text>
 
         {Svg ? <>
           <Text bold>Đang làm · {working.length}</Text>
@@ -1299,9 +1306,9 @@ export const register: Register = (on, options) => {
         {state.codex?.runs.map(run => <Text>
           {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools}{run.partial ? '+' : ''} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
         </Text>)}
-        {scene?.agents.filter(agent => agent.kind === 'claude-cli').map(agent => <Box key={agent.id} flexDirection="column">
+        {scene.agents.filter(agent => agent.kind === 'claude-cli').map(agent => <Box key={agent.id} flexDirection="column">
           <Text bold>{agent.name}</Text>
-          <Text>{agent.status === 'running' ? STATUS.running : STATUS.completed} · {agent.task} · {agentUsageText(agent)}</Text>
+          <Text>{agent.status === 'idle' ? STATUS.idle : agent.status === 'running' ? STATUS.running : STATUS.completed} · {agent.task} · {agentUsageText(agent)}</Text>
           <Text>Limit Claude · {agentLimitText(agent.limit, false)}</Text>
         </Box>)}
         </>}

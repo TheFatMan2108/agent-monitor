@@ -135,11 +135,11 @@ test('terminal giữ layout chữ; desktop/vscode/mobile có văn phòng, avatar
       expect(await ui.find({ type: 'Text', text: 'Văn phòng Agent' })).toBe(undefined)
     } else {
       expect((await ui.find({ type: 'Text', text: 'Văn phòng Agent' }))?.text).toBe('Văn phòng Agent')
-      expect(svgs.length).toBe(6) // Văn phòng, 4 avatar, 1 bar.
+      expect(svgs.length).toBe(7) // Văn phòng, 5 avatar, 1 bar.
       expect(svgs[0]?.props.isInteractive).toBe(true)
-      expect(svgs[0]?.props.alt).toBe('Văn phòng: 3 agent đang làm, 1 agent đang nghỉ')
+      expect(svgs[0]?.props.alt).toBe('Văn phòng: 3 agent đang làm, 2 agent đang nghỉ')
       const avatars = svgs.filter(svg => String(svg.props.alt).startsWith('Chân dung'))
-      expect(avatars.length).toBe(4)
+      expect(avatars.length).toBe(5)
       expect(avatars.every(svg => svg.props.isInteractive === undefined)).toBe(true)
       const bars = svgs.filter(svg => String(svg.props.alt).startsWith('Đang xử lý'))
       expect(bars.length).toBe(1)
@@ -224,12 +224,17 @@ test('session.measure cập nhật phần trăm còn lại và cảnh báo theo 
   expect(result).toEqual({ changed: ['rateLimits', 'context'] })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /5 giờ/ }))?.text)
-      .toBe('5 giờ [██░░░░░░░░] 19% còn lại · còn 3h 47m')
-    expect((await ui.find({ type: 'Text', text: /^Tuần \[/ }))?.text)
-      .toBe('Tuần [░░░░░░░░░░] 4% còn lại · Chưa rõ giờ reset')
-    expect((await ui.find({ type: 'Text', text: /Tuần · sonnet/ }))?.text)
-      .toBe('Tuần · sonnet [███████░░░] 70% còn lại · Chưa rõ giờ reset')
+    const lines = (await ui.findAll({ type: 'Text' })).map(item => item.text)
+    expect(lines.slice(lines.indexOf('Limit còn lại'), lines.indexOf('Chưa có dữ liệu limit Codex'))).toEqual([
+      'Limit còn lại', 'Claude Code',
+      '5 giờ [██░░░░░░░░] 19% còn lại · còn 3h 47m',
+      'Tuần [░░░░░░░░░░] 4% còn lại · Chưa rõ giờ reset',
+      'Tuần · sonnet [███████░░░] 70% còn lại · Chưa rõ giờ reset',
+      'Context phiên này: 15% còn lại', 'Claude CLI',
+      '5 giờ [██░░░░░░░░] 19% còn lại · còn 3h 47m',
+      'Tuần [░░░░░░░░░░] 4% còn lại · Chưa rõ giờ reset',
+      'Dùng chung limit tài khoản Claude với Claude Code', 'Codex CLI',
+    ])
     await ui.unmount()
   }
 })
@@ -906,8 +911,8 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
     .toBe(`Cập nhật lúc ${new Date(NOW).getHours().toString().padStart(2, '0')}:00:00 (theo lần gọi Codex gần nhất)`)
   expect((await ui.find({ type: 'Text', text: /^apply_patch · 1 lần gọi/ }))?.text)
     .toBe('apply_patch · 1 lần gọi · 0h 2m · 12.3k token')
-  expect((await ui.find({ type: 'Text', text: /Mỗi nhóm là limit riêng/ }))?.text)
-    .toBe('Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.')
+  expect((await ui.find({ type: 'Text', text: /Limit tính theo tài khoản;/ }))?.text)
+    .toBe('Limit tính theo tài khoản; Claude CLI và các agent con của Claude dùng chung limit Claude.')
   await clock.advance(8000)
   expect(fixture.lists.length).toBe(4)
   await clock.advance(3000)
@@ -943,6 +948,35 @@ test('fallback chỉ đọc USERPROFILE/.codex/sessions', async ($, on) => {
   expect(fixture.reads).toEqual(['C:/profile/.codex/sessions/2026/11/09/rollout-fallback.jsonl'])
 })
 
+test('Claude CLI chưa được gọi vẫn hiện trạng thái rảnh và limit trong văn phòng, thẻ và pane chữ', async ($, on) => {
+  const { clock, snapshot } = setup(on, {
+    limits: [{ kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 88 }],
+  })
+  await start($)
+  await clock.settle()
+  const scene = buildScene(snapshot(), NOW)
+  const cli = scene.agents.find(agent => agent.kind === 'claude-cli')!
+  expect(cli.limit).toMatchObject({ account: 'claude', fiveHourLeft: 76, weekLeft: 12 })
+  const svg = renderOfficeSvg({ ...scene, agents: [cli] })
+  expect(svg).toContain('>Claude CLI</text>')
+  expect(svg).toContain('data-layer="limit-bar"')
+  expect(svg).not.toContain('>✓</text>')
+
+  const limitLine = 'Limit Claude · 5 giờ 76% · Tuần 12%'
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const card = await desktop.find({ key: 'card:@claude-cli' })
+  expect(card?.text).toContain('Claude CLI · Chưa được giao việc · ○ Rảnh')
+  expect(card?.text).toContain('0 lần gọi · <1m · Chưa rõ token')
+  expect(card?.text).toContain(limitLine)
+  await desktop.unmount()
+
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await terminal.find({ type: 'Text', text: 'Claude CLI' })).toBeDefined()
+  expect(await terminal.find({ type: 'Text', text: limitLine })).toBeDefined()
+  expect(await terminal.find({ type: 'Text', text: '○ Rảnh · Chưa được giao việc · 0 lần gọi · <1m · Chưa rõ token' })).toBeDefined()
+  await terminal.unmount()
+})
+
 test('Claude CLI gộp lượt MCP và hiển thị limit tài khoản Claude trong văn phòng, thẻ và pane chữ', async ($, on) => {
   const { clock, snapshot } = setup(on, {
     limits: [{ kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 88 }],
@@ -969,7 +1003,7 @@ test('Claude CLI gộp lượt MCP và hiển thị limit tài khoản Claude tr
   await start($)
   await clock.settle()
   await $.tool.call({ tool: 'mcp__claude-code__other', tool_use_id: 'other' })
-  expect(agent()).toBe(undefined)
+  expect(agent()).toMatchObject({ status: 'idle', zone: 'lounge', tools: 0 })
   expect(await $.tool.call({ tool, tool_use_id: 'cli-first', workFolder: 'F:\\private\\Game\\', prompt: `[WORKER MODE]\n${'p'.repeat(150)}` })).toEqual(reply)
   expect(inspect().agents.filter(row => row.kind === 'claude-cli').length).toBe(1)
   expect(agent()).toMatchObject({ name: 'Claude CLI', task: 'Game', tools: 2, status: 'completed', zone: 'lounge',
@@ -1215,7 +1249,7 @@ test('card màu đúng ngưỡng 20/5 và ẩn phần trăm Codex hết hạn, k
   }
 })
 
-test('terminal giữ nguyên toàn bộ các dòng chữ, không thêm limit/share của card', async ($, on) => {
+test('terminal hiển thị nhóm limit Claude CLI và giữ nguyên thông tin thẻ agent', async ($, on) => {
   const { clock } = setup(on, { limits: [
     { kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 4 },
   ] })
@@ -1226,11 +1260,17 @@ test('terminal giữ nguyên toàn bộ các dòng chữ, không thêm limit/sha
     'Limit còn lại', 'Claude Code',
     '5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset',
     'Tuần [██████████] 96% còn lại · Chưa rõ giờ reset',
-    'Context phiên này: 70% còn lại', 'Codex CLI', 'Chưa có dữ liệu limit Codex',
-    'Mỗi nhóm là limit riêng của tài khoản đó; các agent con của Claude dùng chung limit Claude.',
+    'Context phiên này: 70% còn lại', 'Claude CLI',
+    '5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset',
+    'Tuần [██████████] 96% còn lại · Chưa rõ giờ reset',
+    'Dùng chung limit tài khoản Claude với Claude Code',
+    'Codex CLI', 'Chưa có dữ liệu limit Codex',
+    'Limit tính theo tài khoản; Claude CLI và các agent con của Claude dùng chung limit Claude.',
     'Các agent', '○ Rảnh · Claude Code · ',
     'Không có công cụ đang chạy · 0 lần gọi · <1m · 0 token',
-    'Codex CLI', 'Chưa có lần gọi Codex trong phiên này', 'Task ngầm · 0', 'Không có task ngầm', 'Tương tác', 'Chưa có tương tác.',
+    'Codex CLI', 'Chưa có lần gọi Codex trong phiên này',
+    'Claude CLI', '○ Rảnh · Chưa được giao việc · 0 lần gọi · <1m · Chưa rõ token', 'Limit Claude · 5 giờ 76% · Tuần 96%',
+    'Task ngầm · 0', 'Không có task ngầm', 'Tương tác', 'Chưa có tương tác.',
   ])
   expect((await ui.findAll({ type: 'Svg' })).length).toBe(0)
   await ui.unmount()

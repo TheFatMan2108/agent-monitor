@@ -1,6 +1,8 @@
 {
   "name": "agent-monitor",
-  "version": "0.10.0",
+  "version": "0.10.1",
+  "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
   "description": "Pane theo dõi limit, tiến độ và tương tác của Claude Code, Claude CLI và Codex CLI.",
   "types": "./types/index.d.ts"
 }

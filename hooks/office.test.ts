@@ -115,7 +115,7 @@ test('tính cách ngẫu nhiên một lần, giữ qua redraw; map chỉ giữ n
   }
   data.agents = []
   buildScene(data, NOW + 300)
-  expect(Object.keys(data.fun!.personalities)).toEqual(['@main'])
+  expect(Object.keys(data.fun!.personalities).sort()).toEqual(['@claude-cli', '@main'])
 })
 
 test('roi chống spam 400ms, combo trong 5s, mặt hết sau 3s và đánh thức đủ 60s', () => {
@@ -291,7 +291,7 @@ test('ngoại hình cố định theo id, khác nhau theo id và không phụ th
 })
 
 test('mọi nhân vật và avatar có hai mắt tối với pixel highlight, kể cả khi lỗi hoặc đang ngồi', () => {
-  const template = buildScene(state(), NOW).agents[0]!
+  const template = buildScene(state(), NOW).agents.find(agent => agent.id === '@main')!
   for (const kind of ['main', 'codex', 'subagent'] as const) {
     for (let seed = 0; seed < 32; seed++) {
       const lookSeed = `face-${seed}`
@@ -352,7 +352,7 @@ test('6 bàn rộng theo 2 cột × 3 hàng, mép bàn sau nhân vật và chỉ
   const svg = renderOfficeSvg(scene)
   expect(scene.agents.filter(agent => agent.zone === 'work' && agent.seat >= 0).length).toBe(6)
   expect((svg.match(/data-layer="desk-front"/g) ?? []).length).toBe(6)
-  const workers = scene.agents.slice().sort((a, b) => a.seat - b.seat)
+  const workers = scene.agents.filter(agent => agent.zone === 'work').sort((a, b) => a.seat - b.seat)
   for (let i = 0; i < workers.length; i++) {
     const title = svg.indexOf(`<title>${workers[i]!.name} ·`)
     const character = svg.indexOf('<g data-layer="character">', title)
@@ -380,9 +380,25 @@ test('mọi trạng thái Claude được ánh xạ đúng khu, main luôn bàn 
     expect(scene.agents.find(agent => agent.id === '@main')?.seat).toBe(0)
     expect(scene.agents.find(agent => agent.id === '@main')?.zone).toBe('work')
   }
-  const fallback = buildScene(state(), NOW).agents[0]!
+  const fallback = buildScene(state(), NOW).agents.find(agent => agent.id === '@main')!
   expect(fallback.id).toBe('@main')
   expect(fallback.seat).toBe(0)
+})
+
+test('Claude CLI chưa được gọi giữ ghế nghỉ và firstSeen qua redraw khi đã có Codex', () => {
+  const data = state(Array.from({ length: 5 }, (_, i) => row(`idle-${i}`, 'idle', NOW + i)))
+  data.codex = { limits: null, runs: [{ id: 'run', folder: 'game', status: 'completed', lastTool: '',
+    tools: 0, tokens: null, elapsed: '<1m', lastAt: NOW - 1000 }] }
+  data.officeSeats = { codex: { zone: 'lounge', seat: 5, firstSeen: NOW - 1000 } }
+  const first = buildScene(data, NOW)
+  const cli = first.agents.find(agent => agent.kind === 'claude-cli')!
+  expect(cli).toMatchObject({ status: 'idle', zone: 'lounge', tools: 0, tokens: null, tick: false })
+  expect(cli.seat).toBeGreaterThanOrEqual(0)
+  expect(first.agents.find(agent => agent.id === 'codex')?.seat).toBe(5)
+  expect(first.agents.find(agent => agent.id === '@main')?.seat).toBe(0)
+  expect(buildScene(data, NOW + 1000).agents.find(agent => agent.kind === 'claude-cli')?.firstSeen).toBe(cli.firstSeen)
+  remember(data, first)
+  expect(buildScene(data, NOW + 2000).agents.find(agent => agent.kind === 'claude-cli')?.seat).toBe(cli.seat)
 })
 
 test('mọi trạng thái Codex được ánh xạ đúng khu và loại', () => {
@@ -489,7 +505,7 @@ test('đủ ghế ưu tiên main, chạy, chờ, lỗi rồi mới nhất; hiệ
     ...Array.from({ length: 9 }, (_, i) => row(`idle-${i}`, 'idle', NOW + i)),
   ])
   const scene = buildScene(data, NOW)
-  expect(scene.overflow).toEqual({ work: 2, lounge: 3 })
+  expect(scene.overflow).toEqual({ work: 2, lounge: 4 })
   expect(scene.agents.find(agent => agent.id === 'wait')!.seat).toBeGreaterThanOrEqual(0)
   expect(scene.agents.find(agent => agent.id === 'failed')!.seat).toBe(-1)
   expect(scene.agents.find(agent => agent.id === 'pending')!.seat).toBe(-1)
@@ -497,7 +513,7 @@ test('đủ ghế ưu tiên main, chạy, chờ, lỗi rồi mới nhất; hiệ
   expect(scene.agents.find(agent => agent.id === 'idle-8')!.seat).toBeGreaterThanOrEqual(0)
   const svg = renderOfficeSvg(scene)
   expect(svg.includes('>+2</text>')).toBe(true)
-  expect(svg.includes('>+3</text>')).toBe(true)
+  expect(svg.includes('>+4</text>')).toBe(true)
   expect((svg.match(/<title>/g) ?? []).length).toBe(12)
 })
 
@@ -536,8 +552,8 @@ test('tick chỉ 60 giây, agent đã kết thúc rời sân khấu sau 5 phút,
   remember(data, first)
   expect(buildScene(data, NOW + 59999).agents.find(agent => agent.id === 'done')?.tick).toBe(true)
   expect(buildScene(data, NOW + 60000).agents.find(agent => agent.id === 'done')?.tick).toBe(false)
-  expect(buildScene(data, NOW + 299999).agents.length).toBe(5)
-  expect(buildScene(data, NOW + 300000).agents.map(agent => agent.id)).toEqual(['@main', 'idle'])
+  expect(buildScene(data, NOW + 299999).agents.length).toBe(6)
+  expect(buildScene(data, NOW + 300000).agents.map(agent => agent.id)).toEqual(['@claude-cli', '@main', 'idle'])
 })
 
 test('SVG escape XML mọi chuỗi không tin cậy, chỉ chứa element/attribute an toàn', () => {
