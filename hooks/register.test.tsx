@@ -943,6 +943,81 @@ test('fallback chỉ đọc USERPROFILE/.codex/sessions', async ($, on) => {
   expect(fixture.reads).toEqual(['C:/profile/.codex/sessions/2026/11/09/rollout-fallback.jsonl'])
 })
 
+test('Claude CLI gộp lượt MCP và hiển thị limit tài khoản Claude trong văn phòng, thẻ và pane chữ', async ($, on) => {
+  const { clock, snapshot } = setup(on, {
+    limits: [{ kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 88 }],
+  })
+  const limitLine = 'Limit Claude · 5 giờ 76% · Tuần 12%'
+  const tool = 'mcp__claude-code__claude_code' as const
+  const reply = { result: {}, text: 'PRIVATE_CLI_OUTPUT' }
+  const inspect = () => buildScene(snapshot(), NOW)
+  const agent = () => inspect().agents.find(row => row.id === '@claude-cli')
+  on('tool.call', async (_, e) => {
+    if (e.tool_use_id === 'cli-first') {
+      expect(agent()).toMatchObject({ task: 'Game', tools: 1, status: 'running', zone: 'work' })
+      expect(snapshot().feed[0]).toMatchObject({ from: '@main', to: '@claude-cli', kind: 'claude-cli', text: 'p'.repeat(120) })
+      await $.tool.call({ tool, tool_use_id: 'cli-second', workFolder: '/private/UI/', prompt: 'Kiểm tra UI' })
+      expect(agent()).toMatchObject({ task: 'Game', tools: 2, status: 'running' })
+    } else if (e.tool_use_id === 'cli-second') {
+      expect(agent()).toMatchObject({ task: 'UI', tools: 2, status: 'running' })
+    }
+    if (e.tool_use_id === 'cli-second' || e.tool_use_id === 'cli-failed') {
+      return { result: {}, text: 'PRIVATE_CLI_FAILURE', isError: true }
+    }
+    return reply
+  })
+  await start($)
+  await clock.settle()
+  await $.tool.call({ tool: 'mcp__claude-code__other', tool_use_id: 'other' })
+  expect(agent()).toBe(undefined)
+  expect(await $.tool.call({ tool, tool_use_id: 'cli-first', workFolder: 'F:\\private\\Game\\', prompt: `[WORKER MODE]\n${'p'.repeat(150)}` })).toEqual(reply)
+  expect(inspect().agents.filter(row => row.kind === 'claude-cli').length).toBe(1)
+  expect(agent()).toMatchObject({ name: 'Claude CLI', task: 'Game', tools: 2, status: 'completed', zone: 'lounge',
+    limit: { account: 'claude', fiveHourLeft: 76, weekLeft: 12, binding: 12 } })
+  const scene = inspect()
+  expect(scene.agents.find(row => row.id === '@main')?.limit).toEqual(agent()?.limit)
+  const cliOnlySvg = renderOfficeSvg({ ...scene, agents: scene.agents.filter(row => row.id === '@claude-cli') })
+  expect(cliOnlySvg).toMatch(/data-layer="limit-bar"[^]*?width="2" height="2" fill="#e4b65d"/)
+  expect(snapshot().feed.slice(0, 2).map(item => item.text)).toEqual(['xong sau <1m', 'lỗi'])
+  expect(renderOfficeSvg(inspect())).toContain('>Claude CLI</text>')
+  expect(renderOfficeSvg(inspect())).toContain('#77609b')
+  expect(JSON.stringify(snapshot())).not.toMatch(/private|WORKER MODE/i)
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await terminal.find({ type: 'Text', text: 'Claude CLI' }))?.text).toBe('Claude CLI')
+  expect((await terminal.find({ type: 'Text', text: limitLine }))?.text).toBe(limitLine)
+  expect((await terminal.find({ type: 'Text', text: /2 lần gọi · <1m · Chưa rõ token/ }))?.text).toContain('Game')
+  expect((await terminal.find({ type: 'Text', text: /Claude giao việc cho Claude CLI: p/ }))?.text?.endsWith('p'.repeat(120))).toBe(true)
+  await terminal.unmount()
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const card = await desktop.find({ key: 'card:@claude-cli' })
+  expect(card?.text).toContain('Claude CLI')
+  expect(card?.text).toMatch(/Limit Claude · 5 giờ (?:\[[█░]{10}\] )?76% · Tuần (?:\[[█░]{10}\] )?12%/)
+  expect(card?.text).toContain('2 lần gọi · <1m · Chưa rõ token')
+  expect((await desktop.find({ key: 'fun:work:@claude-cli' }))?.type).toBe('Button')
+  expect((await desktop.find({ key: 'fun:whip:@claude-cli' }))?.type).toBe('Button')
+  await desktop.unmount()
+  await $.tool.call({ tool, tool_use_id: 'cli-failed', workFolder: '/private/Build' })
+  expect(agent()).toMatchObject({ task: 'Build', status: 'failed' })
+  const failedScene = inspect()
+  expect(renderOfficeSvg({ ...failedScene, agents: failedScene.agents.filter(row => row.id === '@claude-cli') }))
+    .toContain('>!</text>')
+})
+
+test('Claude CLI ghi timeout MCP và chuyển sang nghỉ', async ($, on) => {
+  const { snapshot } = setup(on)
+  const timeout = { result: { isError: true }, text: 'MCP timed out PRIVATE_CLI_TIMEOUT' }
+  on('tool.call', () => timeout)
+  await start($)
+  expect(await $.tool.call({ tool: 'mcp__claude-code__claude_code', prompt: '[WORKER MODE]' })).toEqual(timeout)
+  expect(snapshot().feed[0]).toMatchObject({
+    kind: 'claude-cli', from: '@claude-cli', to: '@main', text: 'hết thời gian chờ MCP, Claude CLI có thể vẫn đang chạy',
+  })
+  expect(buildScene(snapshot(), NOW).agents.find(row => row.kind === 'claude-cli')).toMatchObject({
+    task: 'Xử lý yêu cầu', status: 'completed', zone: 'lounge',
+  })
+  expect(JSON.stringify(snapshot())).not.toContain('PRIVATE_CLI_TIMEOUT')
+})
+
 test('feed MCP Codex ghi trước/sau next, giữ nguyên input/result cho cả ba tool', async ($, on) => {
   const { snapshot } = setup(on)
   const prompt = 'p'.repeat(180)

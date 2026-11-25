@@ -16,7 +16,7 @@ export type AgentRow = {
 }
 export type FeedItem = {
   at: number
-  kind: 'spawn' | 'send' | 'finish' | 'codex' | 'background'
+  kind: 'spawn' | 'send' | 'finish' | 'codex' | 'claude-cli' | 'background'
   from: string
   to: string
   text: string
@@ -70,6 +70,7 @@ export type BackgroundTask = {
 export type ScheduledTask = { id: string; schedule: string; recurring: boolean; prompt: string }
 export type CodexLaunch = { id: string; at: number; cwd?: string; background?: true }
 export type CodexData = { limits: CodexLimits | null; runs: CodexRun[] }
+export type ClaudeCliCall = { id: string; task: string; startedAt: number }
 export type MonitorState = {
   fun?: FunState
   officePlayFailed?: boolean
@@ -78,6 +79,13 @@ export type MonitorState = {
   contextRemaining: number | null
   feed: FeedItem[]
   codex: CodexData | null
+  /** @internal Dữ liệu quan sát từ tool.call của phiên hiện tại. */
+  claudeCli?: {
+    firstSeen: number
+    calls: number
+    active: ClaudeCliCall[]
+    latest: ClaudeCliCall & { endedAt?: number; outcome?: 'success' | 'error' | 'timeout' }
+  }
   codexLaunches?: CodexLaunch[]
   background?: BackgroundTask[]
   scheduled?: ScheduledTask[]
@@ -93,7 +101,7 @@ export type MonitorState = {
 export type OfficeView = { x: number; y: number; w: number; h: number }
 export type OfficeSize = { w: number; h: number }
 export type OfficeZone = 'work' | 'lounge'
-export type OfficeKind = 'main' | 'subagent' | 'codex'
+export type OfficeKind = 'main' | 'subagent' | 'codex' | 'claude-cli'
 export type OfficeStatus = AgentRow['status'] | 'stopped'
 export type OfficeSeat = { zone: OfficeZone; seat: number; firstSeen: number }
 export type OfficeAgent = OfficeSeat & {
@@ -139,7 +147,7 @@ export type FunState = {
 }
 export type OfficeScene = {
   agents: OfficeAgent[]
-  interactions: { from: string; to: string; kind: 'spawn' | 'send' | 'codex' }[]
+  interactions: { from: string; to: string; kind: 'spawn' | 'send' | 'codex' | 'claude-cli' }[]
   overflow: { work: number; lounge: number }
   background?: { id: string; kind: BackgroundKind; label: string }[]
   backgroundOverflow?: number

@@ -97,6 +97,20 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
       tick: representative.status === 'completed' && now >= representative.lastAt && now - representative.lastAt < 60000,
     }, firstSeen)
   }
+  const cli = state.claudeCli
+  if (cli) {
+    const active = cli.active.at(-1)
+    const call = active ?? cli.latest
+    const endedAt = active ? undefined : cli.latest.endedAt
+    const status = active ? 'running' : cli.latest.outcome === 'error' ? 'failed' : 'completed'
+    const minutes = Math.max(0, Math.floor(((endedAt ?? now) - call.startedAt) / 60000))
+    add({
+      id: '@claude-cli', name: 'Claude CLI', task: call.task, kind: 'claude-cli', lookSeed: '@claude-cli',
+      status, tool: 'MCP Claude CLI', tools: cli.calls, tokens: null,
+      elapsed: minutes === 0 ? '<1m' : `${Math.floor(minutes / 60)}h ${minutes % 60}m`,
+      tick: status === 'completed' && endedAt !== undefined && now >= endedAt && now - endedAt < 60000,
+    }, cli.firstSeen)
+  }
   // Bao gồm mọi agent có card trong scene, cả những người đang chờ ghế.
   const tokens = { claude: 0, codex: 0 }
   for (const agent of agents) tokens[agent.limit.account] += agent.tokens ?? 0
@@ -213,6 +227,7 @@ function character(seed: string, kind: OfficeKind, parentSeed?: string, headOnly
   const style = (value >>> 9) % HAIR_STYLES.length
   const ownShirt = SHIRTS[(value >>> 13) % SHIRTS.length]
   const shirt = kind === 'main' ? '#b96d50' : kind === 'codex' ? '#343943'
+    : kind === 'claude-cli' ? '#dfaa88'
     : kind === 'subagent' ? tint(ownShirt, SHIRTS[hash(parentSeed ?? seed) % SHIRTS.length]) : tint(ownShirt, '#93958e')
   const skin = SKIN[(value >>> 5) % SKIN.length]
   const palette = { o: OUTLINE, h: HAIR[value % HAIR.length], H: '#d9b78a', O: OUTLINE, c: shirt, C: '#eee1b7' }
@@ -254,6 +269,8 @@ function character(seed: string, kind: OfficeKind, parentSeed?: string, headOnly
     if (kind === 'main') art += rect(7, 14, 1, 5, '#edbf83') + pixels(['.y.', 'yyy', '.y.'], { y: '#f7d983' }, 9, 15)
     if (kind === 'codex') art += rect(5, 14, 1, 3, '#8b9596') + rect(10, 14, 1, 3, '#8b9596')
       + rect(8, 16, 2, 2, '#8cbd83')
+    if (kind === 'claude-cli') art += rect(5, 14, 6, 5, '#f8e6c8') + rect(6, 15, 4, 3, '#62483d')
+      + pixels(['t...', '.t..', 't.tt'], { t: '#f8e6c8' }, 6, 15)
     if (kind === 'subagent') art += rect(6, 14, 1, 3, '#f6e4c1') + rect(9, 14, 1, 3, '#f6e4c1')
       + rect(7, 17, 2, 2, '#f6e4c1') + rect(7, 17, 1, 1, '#658da0')
   }
@@ -378,13 +395,13 @@ function hands(agent: OfficeAgent): string {
 }
 
 function nameTag(agent: OfficeAgent): string {
-  if (agent.kind !== 'main' && agent.kind !== 'codex') return ''
+  if (agent.kind === 'subagent') return ''
   const { x, y } = position(agent)
-  const width = agent.kind === 'main' ? 38 : 32
+  const width = agent.kind === 'codex' ? 32 : 38
   // Plaque nằm trên mép ghế/sofa, chừa khoảng phía trên đầu của hàng kế tiếp.
   const top = y + (agent.zone === 'work' ? 39 : 33)
   return rect(x - width / 2, top, width, 4, '#f6e7c8')
-    + text(x, top + 3.3, agent.kind === 'main' ? 'Claude Code' : 'Codex CLI', '#65534b', 3.5)
+    + text(x, top + 3.3, agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI' : 'Claude CLI', '#65534b', 3.5)
 }
 
 function limitBar(agent: OfficeAgent): string {
@@ -546,7 +563,8 @@ function draw(scene: OfficeScene, detail: boolean, view: OfficeView, frame?: Off
     const a = position(from), b = position(to)
     if (detail) for (let dot = 1; dot < 8; dot++) art += rect(
       Math.round(a.x + (b.x - a.x) * dot / 8), Math.round(a.y + 10 + (b.y - a.y) * dot / 8), 1, 1, '#78604e', ' opacity=".3"')
-    art += `<g>${rect(-4, -3, 9, 7, OUTLINE)}${rect(-3, -2, 7, 5, '#fff1ce')}${pixels(['c.....c', '.c...c.', '..ccc..'], { c: item.kind === 'codex' ? '#59836b' : '#a36549' }, -3, -2)}<animateMotion path="M ${a.x} ${a.y + 10} L ${b.x} ${b.y + 10}" dur="2.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;1;0" dur="2.4s" repeatCount="indefinite"/></g>`
+    const seal = item.kind === 'codex' ? '#59836b' : item.kind === 'claude-cli' ? '#77609b' : '#a36549'
+    art += `<g>${rect(-4, -3, 9, 7, OUTLINE)}${rect(-3, -2, 7, 5, '#fff1ce')}${pixels(['c.....c', '.c...c.', '..ccc..'], { c: seal }, -3, -2)}<animateMotion path="M ${a.x} ${a.y + 10} L ${b.x} ${b.y + 10}" dur="2.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;1;0" dur="2.4s" repeatCount="indefinite"/></g>`
   }
   return art + '</svg>'
 }

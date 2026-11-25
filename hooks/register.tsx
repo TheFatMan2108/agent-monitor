@@ -3,7 +3,7 @@ import type {
   AgentInfo, AgentStatus, CoreEngineInterface, ElementTable, Register, SessionContextUsage,
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
-import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState } from '../types'
+import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState, OfficeAgent } from '../types'
 import { FULL_VIEW, OFFICE_ACTIONS, OFFICE_WORK_AREA, buildScene, moveView, officeFrame, officeHitboxes, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
 import { nextFunDeadline, playFun, updateFunStatus } from './office-fun'
 import type { OfficeAction } from './office'
@@ -13,6 +13,8 @@ export { remaining } from './office'
 const PANE = 'agent-monitor'
 const MAIN = '@main'
 const CODEX = '@codex'
+const CLAUDE_CLI = '@claude-cli'
+const CLAUDE_CLI_TOOLS = new Set(['mcp__claude-code__claude_code'])
 const SHAPE = 'monitor-7'
 const REF = { plugin: 'agent-monitor', key: 'monitor' } as const
 const INITIAL: MonitorState = {
@@ -139,6 +141,7 @@ function addFeed(state: MonitorState, item: FeedItem): void {
 function agentName(state: MonitorState, id: string): string {
   if (id === MAIN) return 'Claude Code'
   if (id === CODEX) return 'Codex CLI'
+  if (id === CLAUDE_CLI) return 'Claude CLI'
   if (id === BACKGROUND) return 'Task ngầm'
   return state.agents.find(row => row.id === id || row.name === id)?.name ?? clean(id)
 }
@@ -179,6 +182,20 @@ function limitLabel(kind: string): string {
   if (kind.startsWith('seven_day_')) return `Tuần · ${kind.slice(10)}`
   if (kind.startsWith('five_hour_')) return `5 giờ · ${kind.slice(10)}`
   return `Theo mô hình · ${kind}`
+}
+
+function agentLimitText({ fiveHourLeft, weekLeft }: OfficeAgent['limit'], bar: boolean): string {
+  const percent = (left: number | null): string => {
+    if (left === null) return 'chưa rõ'
+    const filled = Math.round(left / 10)
+    return `${bar ? `[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ` : ''}${left}%`
+  }
+  return `5 giờ ${percent(fiveHourLeft)} · Tuần ${percent(weekLeft)}`
+}
+
+function agentUsageText(agent: OfficeAgent): string {
+  const tokens = agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`
+  return `${agent.tools}${agent.partial ? '+' : ''} lần gọi · ${agent.elapsed} · ${tokens}`
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -681,7 +698,7 @@ function notifiedStatus(status: string | undefined): BackgroundTask['status'] {
     : status === 'killed' || status === 'stopped' ? 'killed' : 'done'
 }
 
-function codexOutcome(value: unknown, rejected: boolean): 'success' | 'error' | 'timeout' {
+function mcpOutcome(value: unknown, rejected: boolean): 'success' | 'error' | 'timeout' {
   const envelope = object(value)
   const result = object(envelope?.result)
   const failed = rejected || envelope?.isError === true || typeof envelope?.deny === 'string' || result?.isError === true
@@ -842,6 +859,7 @@ export const register: Register = (on, options) => {
     runtime.agentsRevision++
     const id = e.agentId ?? MAIN
     const isCodex = CODEX_TOOLS.has(e.tool)
+    const isClaudeCli = CLAUDE_CLI_TOOLS.has(e.tool)
     const launch = codexLaunch(e)
     let startedAt: number | undefined
     await safely(async () => {
@@ -853,28 +871,54 @@ export const register: Register = (on, options) => {
         row.status = 'running'
         delete row.stoppedAt
         row.active = [...row.active.filter(call => call.id !== e.tool_use_id),
-          { id: e.tool_use_id, text: toolActivity(e) }].slice(-32)
+          { id: e.tool_use_id, text: isClaudeCli ? 'Giao việc cho Claude CLI' : toolActivity(e) }].slice(-32)
         if (launch) state.codexLaunches = [...(state.codexLaunches ?? []).filter(item => item.id !== e.tool_use_id),
           { id: e.tool_use_id, at: now, ...launch }].slice(-MAX_LAUNCHES)
         if (isCodex) addFeed(state, {
           at: now, kind: 'codex', from: MAIN, to: CODEX,
           text: clean('prompt' in e ? e.prompt : ''),
         })
+        if (isClaudeCli) {
+          const folder = 'workFolder' in e && typeof e.workFolder === 'string'
+            ? baseName(e.workFolder.trim().replace(/[\\/]+$/, '')) : ''
+          const call = { id: e.tool_use_id, task: clean(folder.replace(/^[a-z]:$/i, '')) || 'Xử lý yêu cầu', startedAt: now }
+          const cli = state.claudeCli ??= { firstSeen: now, calls: 0, active: [], latest: call }
+          cli.calls++
+          cli.active.push(call)
+          const prompt = 'prompt' in e && typeof e.prompt === 'string' ? e.prompt : ''
+          addFeed(state, {
+            at: now, kind: 'claude-cli', from: MAIN, to: CLAUDE_CLI,
+            text: clean(prompt.replace(/^\s*\[WORKER MODE\]\s*/i, '')),
+          })
+        }
       })
     })
-    const recordCodex = async (value: unknown, rejected: boolean): Promise<void> => {
-      if (!isCodex) return
+    const recordCli = async (value: unknown, rejected: boolean): Promise<void> => {
+      if (!isCodex && !isClaudeCli) return
       await safely(async () => {
         const now = await $.clock.now()
-        const outcome = codexOutcome(value, rejected)
-        const text = outcome === 'timeout' ? 'hết thời gian chờ MCP, Codex có thể vẫn đang chạy'
+        const outcome = mcpOutcome(value, rejected)
+        const cliName = isClaudeCli ? 'Claude CLI' : 'Codex'
+        const text = outcome === 'timeout' ? `hết thời gian chờ MCP, ${cliName} có thể vẫn đang chạy`
           : outcome === 'error' ? 'lỗi' : `xong sau ${elapsed(startedAt ?? now, now)}`
-        await change($, funRuntime, state => addFeed(state, { at: now, kind: 'codex', from: CODEX, to: MAIN, text }))
+        await change($, funRuntime, state => {
+          const cli = state.claudeCli
+          if (isClaudeCli && cli) {
+            const index = cli.active.findIndex(call => call.id === e.tool_use_id)
+            const call = cli.active[index]
+            if (call) {
+              cli.active.splice(index, 1)
+              cli.latest = { ...call, endedAt: now, outcome }
+            }
+          }
+          addFeed(state, { at: now, kind: isClaudeCli ? 'claude-cli' : 'codex',
+            from: isClaudeCli ? CLAUDE_CLI : CODEX, to: MAIN, text })
+        })
       })
     }
     try {
       const result = await next(e)
-      await recordCodex(result, false)
+      await recordCli(result, false)
       await safely(async () => {
         const launched = launchedBackground(e, result)
         if (!launched) return
@@ -883,7 +927,7 @@ export const register: Register = (on, options) => {
       })
       return result
     } catch (error) {
-      await recordCodex(error, true)
+      await recordCli(error, true)
       throw error
     } finally {
       runtime.agentsRevision++
@@ -1113,8 +1157,9 @@ export const register: Register = (on, options) => {
       ? 2 + Number(!!state.codex.limits.primary) + Number(!!state.codex.limits.secondary) + Number(state.codex.limits.reached) : 2
     const baseRows = 10 + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
       + (e.props.view.agentId ? 1 : 0) + 1 + Math.max(1, backgroundShown.length) + (scheduled.length ? 1 + scheduled.length : 0)
+      + (state.claudeCli ? (Svg ? 2 : 3) : 0)
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
-    const scene = Svg ? buildScene(state, now) : undefined
+    const scene = Svg || state.claudeCli ? buildScene(state, now) : undefined
     const view = state.officeView ?? FULL_VIEW
     const frame = officeFrame(view, state.officeSize)
     const working = scene?.agents.filter(agent => agent.zone === 'work') ?? []
@@ -1125,27 +1170,23 @@ export const register: Register = (on, options) => {
     const activityBar = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="4" viewBox="0 0 240 4"><rect width="240" height="4" fill="#e7ddc6"/><rect width="48" height="4" fill="#79a49b"><animate attributeName="x" values="-48;240" dur="2s" repeatCount="indefinite"/></rect></svg>'
     const cards = (rows: NonNullable<typeof scene>['agents'], small: boolean) => rows.map(agent => {
       const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
-        : 'Agent con Claude'
+        : agent.kind === 'claude-cli' ? 'Claude CLI' : 'Agent con Claude'
       const name = agent.name === type ? '' : ` · ${agent.name}`
       const status = agent.status === 'stopped' ? CODEX_STATUS.stopped : STATUS[agent.status]
-      const detail = `${agent.tool} · ${agent.tools}${agent.partial ? '+' : ''} lần gọi · ${agent.elapsed} · ${agent.tokens === null ? 'Chưa rõ token' : `${compact(agent.tokens)} token`}`
-      const { fiveHourLeft, weekLeft, binding, share, account } = agent.limit
+      const detail = `${agent.tool} · ${agentUsageText(agent)}`
+      const { binding, share, account } = agent.limit
       const limitColor = binding === null ? undefined : binding < 5 ? 'error' : binding < 20 ? 'warning' : undefined
-      const percent = (left: number | null, bar: boolean): string => {
-        if (left === null) return 'chưa rõ'
-        const filled = Math.round(left / 10)
-        return `${bar ? `[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ` : ''}${left}%`
-      }
-      const limitDetail = `5 giờ ${percent(fiveHourLeft, !small)} · Tuần ${percent(weekLeft, !small)}`
+      const limitDetail = agentLimitText(agent.limit, !small)
+      const limitLabel = `Limit ${account === 'codex' ? 'Codex' : 'Claude'} · ${limitDetail}`
       return <Box key={`card:${agent.id}`} flexDirection="row" gap={1} padding={1} borderStyle="round" borderColor="subtle">
         {Svg && <Svg source={renderAvatarSvg(agent.lookSeed, agent.kind)} alt={`Chân dung ${agent.name}`} width={36} height={36} />}
         <Box flexDirection="column" flexGrow={1}>
-          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text>{name} · {agent.task} · {status} · {detail}<Text color={limitColor}> · {limitDetail}</Text></Text>
+          {small ? <Text><Text color={agent.kind === 'codex' ? 'success' : 'suggestion'}>{type}{agent.model ? ` · ${agent.model}` : ''}</Text>{name} · {agent.task} · {status} · {detail}<Text color={limitColor}> · {agent.kind === 'claude-cli' ? limitLabel : limitDetail}</Text></Text>
             : <>
               <Text bold>{agent.task}</Text>
               <Text color={agent.kind === 'codex' ? 'success' : agent.kind === 'main' ? 'claude' : 'suggestion'}>{type}{name}{agent.model ? ` · ${agent.model}` : ''} · {status}</Text>
               <Text dimColor>{detail}</Text>
-              <Text color={limitColor}>Limit {account === 'codex' ? 'Codex' : 'Claude'} · {limitDetail}</Text>
+              <Text color={limitColor}>{limitLabel}</Text>
               {share !== null && <Text dimColor>Agent này chiếm {share}% token của tài khoản trong các agent đang theo dõi</Text>}
               {Svg && agent.status === 'running' && <Box marginTop={1}><Svg source={activityBar} alt="Đang xử lý, chưa có số liệu tiến độ" width={240} height={4} /></Box>}
             </>}
@@ -1258,6 +1299,11 @@ export const register: Register = (on, options) => {
         {state.codex?.runs.map(run => <Text>
           {CODEX_STATUS[run.status]} · {run.folder} · {run.lastTool || 'Chưa gọi công cụ'} · {run.tools}{run.partial ? '+' : ''} lần gọi · {run.elapsed} · {run.tokens === null ? 'Chưa rõ token' : `${compact(run.tokens)} token`}
         </Text>)}
+        {scene?.agents.filter(agent => agent.kind === 'claude-cli').map(agent => <Box key={agent.id} flexDirection="column">
+          <Text bold>{agent.name}</Text>
+          <Text>{agent.status === 'running' ? STATUS.running : STATUS.completed} · {agent.task} · {agentUsageText(agent)}</Text>
+          <Text>Limit Claude · {agentLimitText(agent.limit, false)}</Text>
+        </Box>)}
         </>}
         {canView && e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}
         <Text bold>Task ngầm · {backgroundRunning.length}</Text>
@@ -1272,7 +1318,8 @@ export const register: Register = (on, options) => {
         <Text bold>Tương tác</Text>
         {state.feed.length === 0 && <Text dimColor>Chưa có tương tác.</Text>}
         {state.feed.slice(0, feedRoom).map(item => (
-          <Text>{clockText(item.at)} {agentName(state, item.from)} → {agentName(state, item.to)}: {item.kind === 'spawn' ? 'giao việc ' : ''}{item.text}</Text>
+          <Text>{clockText(item.at)} {item.kind === 'claude-cli' && item.to === CLAUDE_CLI
+            ? 'Claude giao việc cho Claude CLI' : `${agentName(state, item.from)} → ${agentName(state, item.to)}`}: {item.kind === 'spawn' ? 'giao việc ' : ''}{item.text}</Text>
         ))}
       </Box>
     )
