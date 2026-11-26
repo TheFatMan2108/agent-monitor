@@ -5,8 +5,18 @@ import type { CodexLaunch, MonitorState } from '../types'
 import { remaining, resetText, register, parseTaskNotification, reconcileBackground, parseCodexCommand, claimCodexRuns, normalizePath, parseCodexRollout, codexWindowText, codexStatus, readCodex, buildCodexReadArgv } from './register'
 import { FULL_VIEW, OFFICE_WORK_AREA, buildScene, officeFrame, officeHitboxes, renderOfficeSvg } from './office'
 import officePlay from './office-play'
+import { parseClaudeCliUsage } from './register'
 
 const NOW = Date.parse('2026-11-09T03:00:00Z')
+const CLI_TOKEN = 'PRIVATE_TOKEN'
+const CLI_USAGE = JSON.stringify({
+  five_hour: { utilization: 14, resets_at: '2026-11-09T03:02:00Z' },
+  seven_day: { utilization: 61, resets_at: null },
+  seven_day_opus: { utilization: 5, resets_at: null },
+  ignored: CLI_TOKEN,
+})
+const NO_CLI_LIMITS = 'Chưa có dữ liệu limit Claude CLI'
+const CLI_EXPIRED = 'Đăng nhập Claude CLI đã hết hạn, chạy `claude` để làm mới'
 const PANE = {
   plugin: 'agent-monitor', component: 'Pane', requestId: 'agent-monitor',
   viewport: { columns: 100, rows: 100 },
@@ -231,9 +241,7 @@ test('session.measure cập nhật phần trăm còn lại và cảnh báo theo 
       'Tuần [░░░░░░░░░░] 4% còn lại · Chưa rõ giờ reset',
       'Tuần · sonnet [███████░░░] 70% còn lại · Chưa rõ giờ reset',
       'Context phiên này: 15% còn lại', 'Claude CLI',
-      '5 giờ [██░░░░░░░░] 19% còn lại · còn 3h 47m',
-      'Tuần [░░░░░░░░░░] 4% còn lại · Chưa rõ giờ reset',
-      'Dùng chung limit tài khoản Claude với Claude Code', 'Codex CLI',
+      NO_CLI_LIMITS, 'Codex CLI',
     ])
     await ui.unmount()
   }
@@ -706,10 +714,12 @@ test('lỗi listing ẩn Codex; lỗi đọc, parse hoặc link từng file khô
   expect(await readCodex(alias.api, '/codex/../private', NOW)).toBe(null)
 })
 
-function mockCodexFiles(on: On, fixture: ReturnType<typeof codexFixture>, withProcess = false): void {
+function mockCodexFiles(
+  on: On, fixture: ReturnType<typeof codexFixture>, withProcess = false, read = fixture.api.fs.read,
+): void {
   on('fs.list', async (_, e) => ({ value: await fixture.api.fs.list(e.path?.replace(/\\/g, '/')) }))
   on('fs.stat', async (_, e) => ({ value: await fixture.api.fs.stat(e.path.replace(/\\/g, '/'), { resolve: e.resolve ?? false }) }))
-  on('fs.read', async (_, e) => ({ value: await fixture.api.fs.read(e.path.replace(/\\/g, '/')) }))
+  on('fs.read', async (_, e) => ({ value: await read(e.path.replace(/\\/g, '/')) }))
   if (withProcess) on('process.run', async (_, e) => ({ value: await fixture.api.process.run(e.argv, e.init) }))
 }
 
@@ -911,8 +921,8 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
     .toBe(`Cập nhật lúc ${new Date(NOW).getHours().toString().padStart(2, '0')}:00:00 (theo lần gọi Codex gần nhất)`)
   expect((await ui.find({ type: 'Text', text: /^apply_patch · 1 lần gọi/ }))?.text)
     .toBe('apply_patch · 1 lần gọi · 0h 2m · 12.3k token')
-  expect((await ui.find({ type: 'Text', text: /Limit tính theo tài khoản;/ }))?.text)
-    .toBe('Limit tính theo tài khoản; Claude CLI và các agent con của Claude dùng chung limit Claude.')
+  expect((await ui.find({ type: 'Text', text: /Mỗi nhóm hiển thị limit/ }))?.text)
+    .toBe('Mỗi nhóm hiển thị limit của tài khoản tương ứng. Các agent con của Claude dùng chung limit Claude Code.')
   await clock.advance(8000)
   expect(fixture.lists.length).toBe(4)
   await clock.advance(3000)
@@ -934,18 +944,26 @@ test('poll Codex mỗi 15 giây, ghi atom khi đổi, UI hai tài khoản và re
   await empty.unmount()
 })
 
-test('fallback chỉ đọc USERPROFILE/.codex/sessions', async ($, on) => {
+test('fallback đọc Codex và Claude CLI dưới USERPROFILE', async ($, on) => {
   const { clock, snapshot } = setup(on, { env: { USERPROFILE: 'C:/profile', OS: 'Windows_NT' }, launches: [{ id: 'l', at: NOW }] })
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   const fixture = codexFixture('C:/profile/.codex', [{
     name: 'rollout-fallback.jsonl', mtime: NOW,
     text: codexLine('event_msg', { type: 'task_complete' }),
   }])
-  mockCodexFiles(on, fixture)
+  mockCodexFiles(on, fixture, false, async path => {
+    if (path === 'C:/profile/.claude/.credentials.json') {
+      fixture.reads.push(path)
+      throw new Error('ENOENT')
+    }
+    return fixture.api.fs.read(path)
+  })
   await start($)
   await clock.settle()
   expect(snapshot().codex?.runs[0]?.status).toBe('completed')
-  expect(fixture.reads).toEqual(['C:/profile/.codex/sessions/2026/11/09/rollout-fallback.jsonl'])
+  expect(fixture.reads.sort()).toEqual([
+    'C:/profile/.claude/.credentials.json', 'C:/profile/.codex/sessions/2026/11/09/rollout-fallback.jsonl',
+  ])
 })
 
 test('Claude CLI chưa được gọi vẫn hiện trạng thái rảnh và limit trong văn phòng, thẻ và pane chữ', async ($, on) => {
@@ -956,13 +974,13 @@ test('Claude CLI chưa được gọi vẫn hiện trạng thái rảnh và limi
   await clock.settle()
   const scene = buildScene(snapshot(), NOW)
   const cli = scene.agents.find(agent => agent.kind === 'claude-cli')!
-  expect(cli.limit).toMatchObject({ account: 'claude', fiveHourLeft: 76, weekLeft: 12 })
+  expect(cli.limit).toMatchObject({ account: 'claude-cli', fiveHourLeft: null, weekLeft: null })
   const svg = renderOfficeSvg({ ...scene, agents: [cli] })
   expect(svg).toContain('>Claude CLI</text>')
   expect(svg).toContain('data-layer="limit-bar"')
   expect(svg).not.toContain('>✓</text>')
 
-  const limitLine = 'Limit Claude · 5 giờ 76% · Tuần 12%'
+  const limitLine = NO_CLI_LIMITS
   const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const card = await desktop.find({ key: 'card:@claude-cli' })
   expect(card?.text).toContain('Claude CLI · Chưa được giao việc · ○ Rảnh')
@@ -977,11 +995,126 @@ test('Claude CLI chưa được gọi vẫn hiện trạng thái rảnh và limi
   await terminal.unmount()
 })
 
-test('Claude CLI gộp lượt MCP và hiển thị limit tài khoản Claude trong văn phòng, thẻ và pane chữ', async ($, on) => {
+test('parse hạn mức Claude CLI hợp lệ, thiếu trường và dữ liệu rác', () => {
+  expect(parseClaudeCliUsage(CLI_USAGE, NOW)).toEqual({
+    updatedAt: NOW,
+    fiveHour: { usedPercent: 14, windowMinutes: 300, resetsAt: (NOW + 120000) / 1000 },
+    week: { usedPercent: 61, windowMinutes: 10080 },
+    opusWeek: { usedPercent: 5, windowMinutes: 10080 },
+  })
+  expect(parseClaudeCliUsage('{"five_hour":{"utilization":0,"resets_at":false},"seven_day":{"utilization":"61"}}', NOW))
+    .toEqual({ updatedAt: NOW, fiveHour: { usedPercent: 0, windowMinutes: 300 }, week: null, opusWeek: null })
+  for (const text of ['garbage', 'null', '[]', '{}', '{"five_hour":{"utilization":101}}', '{"five_hour":{"utilization":-1}}']) {
+    expect(parseClaudeCliUsage(text, NOW)).toBe(null)
+  }
+})
+
+test('poll hạn mức Claude CLI theo tài khoản, bảo vệ token và giới hạn lần gọi sau MCP', async ($, on) => {
+  const { clock, snapshot } = setup(on, {
+    env: { CLAUDE_CONFIG_DIR: 'C:/cli-config', USERPROFILE: 'C:/ignored' },
+    limits: [{ kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 88 }],
+  })
+  let reads = 0
+  let expiresAt = NOW - 1
+  let mode: 'unauthorized' | 'ok' | 'offline' | 'slow' = 'unauthorized'
+  const requests: string[] = []
+  const paths: string[] = []
+  on('fs.read', (_, e) => {
+    const path = e.path.replace(/\\/g, '/')
+    paths.push(path)
+    if (path === 'C:/cli-config/.credentials.json') {
+      reads++
+      return { value: JSON.stringify({ claudeAiOauth: { accessToken: CLI_TOKEN, refreshToken: 'PRIVATE_REFRESH', expiresAt } }) }
+    }
+    if (path === 'C:/cli-config/.claude.json') {
+      return { value: JSON.stringify({ oauthAccount: { emailAddress: CLI_TOKEN, displayName: 'CLI profile' } }) }
+    }
+    return { value: '{}' }
+  })
+  on('http.fetch', async (_, e) => {
+    requests.push(e.url)
+    expect(e.init?.method).toBe('GET')
+    expect(e.init?.headers).toEqual({
+      Authorization: `Bearer ${CLI_TOKEN}`, 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json',
+    })
+    if (mode === 'offline') throw new Error(CLI_TOKEN)
+    if (mode === 'slow') await clock.sleep(20000)
+    const unauthorized = mode === 'unauthorized'
+    return { value: { ok: !unauthorized, status: unauthorized ? 401 : 200, headers: {}, text: CLI_USAGE } }
+  })
+  const tool = 'mcp__claude-code__claude_code' as const
+  on('tool.call', () => ({ result: {}, text: 'done' }))
+  const call = async (id: string) => {
+    await $.tool.call({ tool, tool_use_id: id })
+    await clock.settle()
+  }
+  await start($)
+  await clock.settle()
+  expect(paths.filter(path => path.endsWith('/.credentials.json'))).toEqual(['C:/cli-config/.credentials.json'])
+  expect(reads).toBe(1)
+  expect(requests).toEqual([])
+  expect(snapshot().claudeCliLoginExpired).toBe(true)
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await terminal.find({ type: 'Text', text: CLI_EXPIRED })).toBeDefined()
+  await terminal.unmount()
+
+  expiresAt = NOW + 3600000
+  await clock.advance(60000)
+  await call('unauthorized')
+  expect(requests.length).toBe(1)
+  expect(snapshot().claudeCliLoginExpired).toBe(true)
+  expect(snapshot().claudeCliLimits).toBeUndefined()
+
+  mode = 'ok'
+  await call('throttled')
+  await clock.advance(59999)
+  await call('still-throttled')
+  expect(requests.length).toBe(1)
+  await clock.advance(1)
+  await call('success')
+  const updatedAt = NOW + 120000
+  expect(snapshot().claudeCliLoginExpired).toBeUndefined()
+  expect(snapshot().claudeCliLimits?.updatedAt).toBe(updatedAt)
+  const scene = buildScene(snapshot(), updatedAt - 1)
+  expect(scene.agents.find(agent => agent.id === '@claude-cli')?.limit)
+    .toEqual({ account: 'claude-cli', fiveHourLeft: 86, weekLeft: 39, binding: 39, share: null })
+  expect(renderOfficeSvg(scene)).toContain('Limit Claude CLI: 5 giờ 86% · Tuần 39%')
+  expect(buildScene(snapshot(), updatedAt).agents.find(agent => agent.id === '@claude-cli')?.limit.fiveHourLeft).toBe(null)
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: 'Claude CLI · CLI profile' })).toBeDefined()
+    const line = 'Limit Claude CLI · CLI profile · 5 giờ chưa rõ · Tuần 39%'
+    if (surface === 'desktop') expect((await ui.find({ key: 'card:@claude-cli' }))?.text).toContain(line)
+    else expect(await ui.find({ type: 'Text', text: line })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /5 giờ · đã reset/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Tuần Opus.*95% còn lại/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Cập nhật lúc \d\d:\d\d:\d\d$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /PRIVATE_TOKEN|PRIVATE_REFRESH/ })).toBeUndefined()
+    await ui.unmount()
+  }
+
+  mode = 'offline'
+  await clock.advance(299999)
+  expect(requests.length).toBe(2)
+  await clock.advance(1)
+  expect(requests.length).toBe(3)
+  expect(snapshot().claudeCliLimits?.updatedAt).toBe(updatedAt)
+  mode = 'slow'
+  await clock.advance(60000)
+  await call('slow')
+  await clock.advance(20000)
+  expect(snapshot().claudeCliLimits?.updatedAt).toBe(updatedAt)
+  expect(reads).toBe(5)
+  expect(requests).toEqual(Array(4).fill('https://api.anthropic.com/api/oauth/usage'))
+  expect(JSON.stringify(snapshot())).not.toMatch(/PRIVATE_TOKEN|PRIVATE_REFRESH/)
+  expect(JSON.stringify(snapshot().feed)).not.toMatch(/PRIVATE_TOKEN|PRIVATE_REFRESH/)
+})
+
+test('Claude CLI gộp lượt MCP và giữ limit chưa rõ khi thiếu dữ liệu CLI', async ($, on) => {
   const { clock, snapshot } = setup(on, {
     limits: [{ kind: 'five_hour', percentUsed: 24 }, { kind: 'seven_day', percentUsed: 88 }],
   })
-  const limitLine = 'Limit Claude · 5 giờ 76% · Tuần 12%'
+  const limitLine = NO_CLI_LIMITS
   const tool = 'mcp__claude-code__claude_code' as const
   const reply = { result: {}, text: 'PRIVATE_CLI_OUTPUT' }
   const inspect = () => buildScene(snapshot(), NOW)
@@ -1007,11 +1140,11 @@ test('Claude CLI gộp lượt MCP và hiển thị limit tài khoản Claude tr
   expect(await $.tool.call({ tool, tool_use_id: 'cli-first', workFolder: 'F:\\private\\Game\\', prompt: `[WORKER MODE]\n${'p'.repeat(150)}` })).toEqual(reply)
   expect(inspect().agents.filter(row => row.kind === 'claude-cli').length).toBe(1)
   expect(agent()).toMatchObject({ name: 'Claude CLI', task: 'Game', tools: 2, status: 'completed', zone: 'lounge',
-    limit: { account: 'claude', fiveHourLeft: 76, weekLeft: 12, binding: 12 } })
+    limit: { account: 'claude-cli', fiveHourLeft: null, weekLeft: null, binding: null } })
   const scene = inspect()
-  expect(scene.agents.find(row => row.id === '@main')?.limit).toEqual(agent()?.limit)
+  expect(scene.agents.find(row => row.id === '@main')?.limit).toMatchObject({ account: 'claude', binding: 12 })
   const cliOnlySvg = renderOfficeSvg({ ...scene, agents: scene.agents.filter(row => row.id === '@claude-cli') })
-  expect(cliOnlySvg).toMatch(/data-layer="limit-bar"[^]*?width="2" height="2" fill="#e4b65d"/)
+  expect(cliOnlySvg).toContain('Limit Claude CLI: 5 giờ chưa rõ · Tuần chưa rõ')
   expect(snapshot().feed.slice(0, 2).map(item => item.text)).toEqual(['xong sau <1m', 'lỗi'])
   expect(renderOfficeSvg(inspect())).toContain('>Claude CLI</text>')
   expect(renderOfficeSvg(inspect())).toContain('#77609b')
@@ -1025,7 +1158,7 @@ test('Claude CLI gộp lượt MCP và hiển thị limit tài khoản Claude tr
   const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const card = await desktop.find({ key: 'card:@claude-cli' })
   expect(card?.text).toContain('Claude CLI')
-  expect(card?.text).toMatch(/Limit Claude · 5 giờ (?:\[[█░]{10}\] )?76% · Tuần (?:\[[█░]{10}\] )?12%/)
+  expect(card?.text).toContain(limitLine)
   expect(card?.text).toContain('2 lần gọi · <1m · Chưa rõ token')
   expect((await desktop.find({ key: 'fun:work:@claude-cli' }))?.type).toBe('Button')
   expect((await desktop.find({ key: 'fun:whip:@claude-cli' }))?.type).toBe('Button')
@@ -1261,15 +1394,13 @@ test('terminal hiển thị nhóm limit Claude CLI và giữ nguyên thông tin 
     '5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset',
     'Tuần [██████████] 96% còn lại · Chưa rõ giờ reset',
     'Context phiên này: 70% còn lại', 'Claude CLI',
-    '5 giờ [████████░░] 76% còn lại · Chưa rõ giờ reset',
-    'Tuần [██████████] 96% còn lại · Chưa rõ giờ reset',
-    'Dùng chung limit tài khoản Claude với Claude Code',
+    NO_CLI_LIMITS,
     'Codex CLI', 'Chưa có dữ liệu limit Codex',
-    'Limit tính theo tài khoản; Claude CLI và các agent con của Claude dùng chung limit Claude.',
+    'Mỗi nhóm hiển thị limit của tài khoản tương ứng. Các agent con của Claude dùng chung limit Claude Code.',
     'Các agent', '○ Rảnh · Claude Code · ',
     'Không có công cụ đang chạy · 0 lần gọi · <1m · 0 token',
     'Codex CLI', 'Chưa có lần gọi Codex trong phiên này',
-    'Claude CLI', '○ Rảnh · Chưa được giao việc · 0 lần gọi · <1m · Chưa rõ token', 'Limit Claude · 5 giờ 76% · Tuần 96%',
+    'Claude CLI', '○ Rảnh · Chưa được giao việc · 0 lần gọi · <1m · Chưa rõ token', NO_CLI_LIMITS,
     'Task ngầm · 0', 'Không có task ngầm', 'Tương tác', 'Chưa có tương tác.',
   ])
   expect((await ui.findAll({ type: 'Svg' })).length).toBe(0)

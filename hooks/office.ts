@@ -35,8 +35,10 @@ function accountLimit(state: MonitorState, account: OfficeAgent['limit']['accoun
       const limit = state.limits.find(row => row.kind === kind)
       return limit ? Math.round(remaining(limit.percentUsed)) : null
     }
-    const window = [state.codex?.limits?.primary, state.codex?.limits?.secondary]
-      .find((item): item is CodexWindow => item?.windowMinutes === minutes)
+    const window = account === 'claude-cli'
+      ? (minutes === 300 ? state.claudeCliLimits?.fiveHour : state.claudeCliLimits?.week)
+      : [state.codex?.limits?.primary, state.codex?.limits?.secondary]
+        .find((item): item is CodexWindow => item?.windowMinutes === minutes)
     if (!window || window.expired || (window.resetsAt !== undefined && window.resetsAt * 1000 <= now)) return null
     return Math.round(remaining(window.usedPercent))
   }
@@ -51,10 +53,15 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
   const agents: OfficeAgent[] = []
   const waitingForCodex = (state.codex?.runs ?? []).some(run => run.background && run.status === 'running')
     && !state.agents.find(row => row.id === MAIN)?.active.length
-  const limits = { claude: accountLimit(state, 'claude', now), codex: accountLimit(state, 'codex', now) }
+  const limits = {
+    claude: accountLimit(state, 'claude', now),
+    'claude-cli': accountLimit(state, 'claude-cli', now),
+    codex: accountLimit(state, 'codex', now),
+  }
   const add = (agent: Omit<OfficeAgent, 'firstSeen' | 'seat' | 'zone' | 'limit'>, firstSeen: number): void => {
     const previous = state.officeSeats?.[agent.id]
-    agents.push({ ...agent, limit: { ...limits[agent.kind === 'codex' ? 'codex' : 'claude'] }, firstSeen: previous?.firstSeen ?? firstSeen,
+    const account = agent.kind === 'codex' || agent.kind === 'claude-cli' ? agent.kind : 'claude'
+    agents.push({ ...agent, limit: { ...limits[account] }, firstSeen: previous?.firstSeen ?? firstSeen,
       zone: agent.kind === 'main' ? 'work' : zone(agent.status), seat: -1 })
   }
   for (const row of state.agents) {
@@ -117,7 +124,7 @@ export function buildScene(state: MonitorState, now: number): OfficeScene {
     }, 0)
   }
   // Bao gồm mọi agent có card trong scene, cả những người đang chờ ghế.
-  const tokens = { claude: 0, codex: 0 }
+  const tokens = { claude: 0, 'claude-cli': 0, codex: 0 }
   for (const agent of agents) tokens[agent.limit.account] += agent.tokens ?? 0
   for (const agent of agents) {
     const total = tokens[agent.limit.account]
@@ -390,7 +397,8 @@ function occupant(agent: OfficeAgent): string {
   const { x, y } = position(agent)
   const resting = agent.zone === 'lounge' || agent.status === 'idle' || agent.status === 'completed' || agent.status === 'killed'
   const percent = (value: number | null): string => value === null ? 'chưa rõ' : `${value}%`
-  const limit = `Limit ${agent.limit.account === 'codex' ? 'Codex' : 'Claude'}: 5 giờ ${percent(agent.limit.fiveHourLeft)} · Tuần ${percent(agent.limit.weekLeft)}`
+  const account = agent.limit.account === 'codex' ? 'Codex' : agent.limit.account === 'claude-cli' ? 'Claude CLI' : 'Claude'
+  const limit = `Limit ${account}: 5 giờ ${percent(agent.limit.fiveHourLeft)} · Tuần ${percent(agent.limit.weekLeft)}`
   const calls = agent.kind === 'codex' && agent.partial ? ` · ${agent.tools}+ lần gọi` : ''
   let art = `<g transform="translate(${x - 12} ${y})"><title>${xml(agent.name)} · ${xml(agent.task)} · ${LABELS[agent.status]}${calls} · ${limit}</title><g>`
   if (resting) art += '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="3s" repeatCount="indefinite"/>'

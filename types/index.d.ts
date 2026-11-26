@@ -70,6 +70,13 @@ export type BackgroundTask = {
 export type ScheduledTask = { id: string; schedule: string; recurring: boolean; prompt: string }
 export type CodexLaunch = { id: string; at: number; cwd?: string; background?: true }
 export type CodexData = { limits: CodexLimits | null; runs: CodexRun[] }
+export type ClaudeCliLimits = {
+  updatedAt: number
+  identity?: string
+  fiveHour: CodexWindow | null
+  week: CodexWindow | null
+  opusWeek: CodexWindow | null
+}
 export type ClaudeCliCall = { id: string; task: string; startedAt: number }
 export type MonitorState = {
   fun?: FunState
@@ -79,6 +86,8 @@ export type MonitorState = {
   contextRemaining: number | null
   feed: FeedItem[]
   codex: CodexData | null
+  claudeCliLimits?: ClaudeCliLimits
+  claudeCliLoginExpired?: true
   /** @internal Dữ liệu quan sát từ tool.call của phiên hiện tại. */
   claudeCli?: {
     firstSeen: number
@@ -129,7 +138,7 @@ export type OfficeAgent = OfficeSeat & {
   tokens: number | null
   tick: boolean
   limit: {
-    account: 'claude' | 'codex'
+    account: 'claude' | 'claude-cli' | 'codex'
     fiveHourLeft: number | null
     weekLeft: number | null
     binding: number | null

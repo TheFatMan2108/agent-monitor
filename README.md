@@ -20,16 +20,16 @@ Mod cho Claude Code: một văn phòng pixel art nằm cạnh khung chat, nơi *
 
 **Limit riêng cho từng agent**
 - Claude Code: limit 5 giờ, limit tuần, thời gian đến lúc reset, và context còn lại của phiên.
-- Claude CLI: nhóm luôn hiện trên desktop và terminal, hiển thị limit 5 giờ và limit tuần dùng chung với Claude Code.
+- Claude CLI: nhóm luôn hiện trên desktop và terminal, với limit 5 giờ, limit tuần, limit tuần Opus khi có, giờ reset và lần cập nhật của tài khoản đăng nhập CLI. Mod lấy số liệu mỗi 5 phút và sau lượt gọi Claude CLI, tối đa một lần mỗi phút.
 - Codex CLI: limit 5 giờ, limit tuần, gói đang dùng, và thời điểm số liệu được cập nhật.
 - Tất cả tính theo phần trăm **còn lại**. Dòng đổi màu khi còn dưới 20% và dưới 5%.
 - Mỗi nhân vật có thanh limit trên đầu, lấy theo cửa sổ gần cạn nhất của tài khoản nó dùng. Mỗi thẻ agent ghi limit 5 giờ, limit tuần và phần token agent đó chiếm.
-- Claude và Codex chỉ cấp limit theo tài khoản, nên các agent cùng tài khoản hiện cùng con số; điểm khác nhau là phần token đã dùng.
+- Mỗi nhóm hiển thị limit của tài khoản tương ứng. Agent con của Claude dùng chung limit Claude Code. Tỷ lệ token được tính riêng trong từng tài khoản.
 
 **Tiến trình**
 - Agent chính và các subagent của Claude, hiển thị lồng theo quan hệ cha con: trạng thái, công cụ đang chạy, số lần gọi, thời gian, token đã dùng. Nút **Xem** mở transcript của subagent.
 - Các lần chạy Codex CLI do chính phiên này gọi (qua MCP hoặc `codex exec`): đang chạy hay đã xong, thư mục làm việc, công cụ gần nhất, số lần gọi, token.
-- Claude CLI luôn có mặt trong văn phòng, ngồi ở khu nghỉ khi chưa được giao việc. Thẻ agent và pane terminal hiển thị limit tài khoản Claude kể cả khi chưa gọi `mcp__claude-code__claude_code`. Khi có lượt gọi, pane theo dõi trạng thái, tên thư mục cuối, số lần gọi và thời lượng.
+- Claude CLI luôn có mặt trong văn phòng, ngồi ở khu nghỉ khi chưa được giao việc. Thẻ agent và pane terminal hiển thị limit tài khoản Claude CLI kể cả khi chưa gọi `mcp__claude-code__claude_code`. Khi có lượt gọi, pane theo dõi trạng thái, tên thư mục cuối, số lần gọi và thời lượng.
 - Pane chỉ hiện việc của phiên đang mở. Limit vẫn là số của cả tài khoản.
 
 **Task ngầm**
@@ -71,11 +71,12 @@ Pane tự mở khi phiên bắt đầu. Nếu đã đóng, gõ `/agent-monitor` 
 
 ## Nguồn dữ liệu và quyền riêng tư
 
-Mod chỉ quan sát, không chặn hay sửa bất kỳ lệnh gọi nào. Mod không gọi model, nên không tốn limit, và không kết nối mạng.
+Mod quan sát phiên hiện tại và kết nối `api.anthropic.com` để lấy hạn mức tài khoản Claude CLI.
 
 | Dữ liệu | Lấy từ |
 | --- | --- |
 | Limit và context của Claude | API của Claude Code (`$.session.usage`) |
+| Limit Claude CLI | `~/.claude/.credentials.json` (hoặc thư mục `CLAUDE_CONFIG_DIR`) và `api.anthropic.com/api/oauth/usage` |
 | Subagent, công cụ, tin nhắn, task ngầm, lịch | Sự kiện trong phiên Claude hiện tại |
 | Tiến trình Claude CLI | Sự kiện `tool.call` trong phiên hiện tại |
 | Limit và tiến trình Codex | `~/.codex/sessions/**/rollout-*.jsonl` (hoặc `CODEX_HOME`) |
@@ -83,6 +84,7 @@ Mod chỉ quan sát, không chặn hay sửa bất kỳ lệnh gọi nào. Mod k
 - Không đọc `auth.json` hay `config.toml`.
 - Từ log Codex chỉ lấy tên công cụ, trạng thái, số token, số liệu limit và tên thư mục. Không lưu nội dung hội thoại, tham số hay kết quả công cụ.
 - Mod không đọc transcript Claude CLI. Từ lượt gọi MCP, mod giữ tên thư mục cuối thay cho đường dẫn và chỉ ghi trạng thái kết quả vào feed.
+- Mod đọc access token của Claude CLI và dùng `$.http.fetch` tới đúng một host, `api.anthropic.com`, để lấy phần trăm limit và giờ reset. Token chỉ nằm trong bộ nhớ khi đọc số liệu. Tên hiển thị lấy từ `oauthAccount` trong `.claude.json` nếu có.
 - Feed lưu tối đa 120 ký tự đầu của tin nhắn hoặc task, và chỉ trong bộ nhớ của phiên.
 
 ## Hạn chế
@@ -93,7 +95,8 @@ Mod chỉ quan sát, không chặn hay sửa bất kỳ lệnh gọi nào. Mod k
 - Log Codex không ghi nó thuộc phiên Claude nào, nên mod ghép theo thời điểm gọi (từ 5 giây trước đến 90 giây sau) và thư mục làm việc. Hai phiên gọi Codex gần như cùng lúc mà không rõ thư mục có thể bị ghép nhầm. Codex chạy ngoài phiên, hoặc trước khi mod được nạp, sẽ không hiện.
 - Định dạng log của Codex không phải API công khai, nên có thể thay đổi theo phiên bản. Khi không đọc được, phần Codex sẽ ẩn hoặc báo chưa có dữ liệu, không ảnh hưởng phiên làm việc.
 - Limit của Claude chỉ có với gói subscription và sau lượt gọi API đầu tiên.
-- Claude chỉ cấp limit theo tài khoản. Claude CLI dùng chung limit 5 giờ và hàng tuần với Claude Code khi dùng cùng tài khoản. Mod đếm lượt gọi MCP của Claude CLI và báo «Chưa rõ token» vì dữ liệu theo dõi hiện tại chưa có số token của các lượt này.
+- API hạn mức Claude CLI chưa có tài liệu công khai và có thể thay đổi. Mod giữ số liệu hợp lệ gần nhất khi gặp lỗi và đánh dấu cửa sổ đã reset khi qua giờ reset. Mod không tự làm mới token. Nếu đăng nhập hết hạn, chạy `claude` để làm mới.
+- Mod đếm lượt gọi MCP của Claude CLI và báo «Chưa rõ token» vì dữ liệu theo dõi hiện tại chưa có số token của các lượt này.
 - Dòng Claude giao việc cho Codex chỉ ghi nhận khi gọi qua MCP `codex-cli`. Lần chạy `codex exec` trực tiếp vẫn hiện ở mục tiến trình.
 
 ## Phát triển

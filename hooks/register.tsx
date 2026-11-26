@@ -3,7 +3,7 @@ import type {
   AgentInfo, AgentStatus, CoreEngineInterface, ElementTable, Register, SessionContextUsage,
   SessionRateLimit, Timer, ToolCallInput,
 } from 'claude-code'
-import type { AgentRow, BackgroundKind, BackgroundTask, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState, OfficeAgent } from '../types'
+import type { AgentRow, BackgroundKind, BackgroundTask, ClaudeCliLimits, CodexData, CodexLaunch, CodexRun, CodexSummary, CodexWindow, FeedItem, MonitorState, OfficeAgent } from '../types'
 import { FULL_VIEW, OFFICE_ACTIONS, OFFICE_WORK_AREA, buildScene, moveView, officeFrame, officeHitboxes, remaining, renderAvatarSvg, renderOfficeSvg, sanitizeOfficeSize, sanitizeView, viewPercent } from './office'
 import { nextFunDeadline, playFun, updateFunStatus } from './office-fun'
 import type { OfficeAction } from './office'
@@ -15,6 +15,12 @@ const MAIN = '@main'
 const CODEX = '@codex'
 const CLAUDE_CLI = '@claude-cli'
 const CLAUDE_CLI_TOOLS = new Set(['mcp__claude-code__claude_code'])
+const CLAUDE_CLI_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+const CLAUDE_CLI_POLL_MS = 300000
+const CLAUDE_CLI_CALL_POLL_MS = 60000
+const CLAUDE_CLI_TIMEOUT_MS = 10000
+const NO_CLAUDE_CLI_LIMITS = 'Chưa có dữ liệu limit Claude CLI'
+const CLAUDE_CLI_LOGIN_EXPIRED = 'Đăng nhập Claude CLI đã hết hạn, chạy `claude` để làm mới'
 const SHAPE = 'monitor-7'
 const REF = { plugin: 'agent-monitor', key: 'monitor' } as const
 const INITIAL: MonitorState = {
@@ -207,6 +213,75 @@ function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
+/** Chỉ giữ phần trăm đã dùng và thời gian reset từ phản hồi OAuth. */
+export function parseClaudeCliUsage(text: string, updatedAt: number): ClaudeCliLimits | null {
+  try {
+    const data = object(JSON.parse(text))
+    const window = (value: unknown, windowMinutes: number): CodexWindow | null => {
+      const row = object(value)
+      const usedPercent = row?.utilization
+      if (!finite(usedPercent) || usedPercent < 0 || usedPercent > 100) return null
+      const reset = row?.resets_at
+      const at = typeof reset === 'string' && /^\d{4}-\d\d-\d\dT/.test(reset) ? Date.parse(reset) : NaN
+      return { usedPercent, windowMinutes, ...(finite(at) ? { resetsAt: at / 1000 } : {}) }
+    }
+    const fiveHour = window(data?.five_hour, 300)
+    const week = window(data?.seven_day, 10080)
+    const opusWeek = window(data?.seven_day_opus, 10080)
+    return fiveHour || week || opusWeek ? { updatedAt, fiveHour, week, opusWeek } : null
+  } catch {
+    return null
+  }
+}
+
+async function readClaudeCliLimits($: CoreEngineInterface): Promise<ClaudeCliLimits | 'expired' | null> {
+  try {
+    const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+    const profile = configured ? undefined : await $.env.get('USERPROFILE')
+    const home = configured || (profile ? `${profile}/.claude` : '')
+    if (!home) return null
+    const directory = home.replace(/[\\/]+$/, '')
+    const oauth = object(object(JSON.parse(await $.fs.read(`${directory}/.credentials.json`)))?.claudeAiOauth)
+    if (finite(oauth?.expiresAt) && oauth.expiresAt <= await $.clock.now()) return 'expired'
+    const token = oauth?.accessToken
+    if (typeof token !== 'string' || !token || /\s/.test(token)) return null
+    let timeout: Timer | undefined
+    const deadline = new Promise<null>(resolve => {
+      timeout = $.clock.after(CLAUDE_CLI_TIMEOUT_MS, () => resolve(null))
+    })
+    const response = await Promise.race([
+      $.http.fetch(CLAUDE_CLI_USAGE_URL, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'anthropic-beta': 'oauth-2025-04-20',
+          'Content-Type': 'application/json',
+        },
+      }),
+      deadline,
+    ]).finally(() => timeout?.cancel())
+    if (response?.status === 401) return 'expired'
+    if (!response?.ok) return null
+    const limits = parseClaudeCliUsage(response.text, await $.clock.now())
+    if (!limits) return null
+    try {
+      const accountPath = configured ? `${directory}/.claude.json` : `${profile}/.claude.json`
+      const account = object(object(JSON.parse(await $.fs.read(accountPath)))?.oauthAccount)
+      for (const value of [account?.emailAddress, account?.displayName]) {
+        if (typeof value !== 'string' || value.includes(token)) continue
+        const identity = clean(value).trim()
+        if (identity) {
+          limits.identity = identity
+          break
+        }
+      }
+    } catch { /* Hồ sơ không bắt buộc để hiển thị hạn mức. */ }
+    return limits
+  } catch {
+    return null
+  }
+}
+
 function codexWindow(value: unknown): CodexWindow | null {
   const data = object(value)
   if (!data || !finite(data.used_percent) || !finite(data.window_minutes) || data.window_minutes <= 0) return null
@@ -288,9 +363,15 @@ export function codexStatus(summary: CodexSummary, mtime: number, now: number): 
 /** Không hiển thị phần trăm cũ sau reset; resetsAt của Codex tính bằng giây. */
 export function codexWindowText(window: CodexWindow, now: number): string {
   const label = window.windowMinutes === 10080 ? 'Tuần' : `${window.windowMinutes / 60} giờ`
-  if (window.resetsAt !== undefined && window.resetsAt * 1000 <= now) {
-    return `${label} · đã reset, chờ lần gọi Codex tiếp theo`
-  }
+  return usageWindowText(window, now, label, 'chờ lần gọi Codex tiếp theo')
+}
+
+function usageWindowExpired(window: CodexWindow, now: number): boolean {
+  return window.expired === true || (window.resetsAt !== undefined && window.resetsAt * 1000 <= now)
+}
+
+function usageWindowText(window: CodexWindow, now: number, label: string, nextUpdate: string): string {
+  if (usageWindowExpired(window, now)) return `${label} · đã reset, ${nextUpdate}`
   const left = remaining(window.usedPercent)
   const filled = Math.round(left / 10)
   const reset = resetText(window.resetsAt === undefined ? undefined : new Date(window.resetsAt * 1000).toISOString(), now)
@@ -808,10 +889,37 @@ async function refresh($: CoreEngineInterface, runtime: PollRuntime): Promise<vo
     } finally { runtime.refreshing = false }
 }
 
+type ClaudeCliPoll = { last: number; pending: boolean; stopped: boolean }
+
+async function pollClaudeCli(
+  $: CoreEngineInterface, poll: ClaudeCliPoll, fun: FunRuntime, afterCall = false,
+): Promise<void> {
+  if (poll.stopped || poll.pending) return
+  const now = await $.clock.now()
+  if (poll.stopped || poll.pending || now - poll.last < (afterCall ? CLAUDE_CLI_CALL_POLL_MS : CLAUDE_CLI_POLL_MS)) return
+  poll.pending = true
+  poll.last = now
+  try {
+    const result = await readClaudeCliLimits($)
+    if (!result || poll.stopped) return
+    await change($, fun, state => {
+      if (poll.stopped) return
+      if (result === 'expired') state.claudeCliLoginExpired = true
+      else {
+        delete state.claudeCliLoginExpired
+        state.claudeCliLimits = result
+      }
+    })
+  } finally {
+    poll.pending = false
+  }
+}
+
 /** Đăng ký pane và observer; mọi dữ liệu hiển thị nằm trong state của phiên. */
 export const register: Register = (on, options) => {
   void options
   let tick: Timer | undefined
+  let cliPoll: ClaudeCliPoll | undefined
   const funRuntime: FunRuntime = {}
   const unavailableViews = new Set<string | undefined>()
   const runtime: PollRuntime = {
@@ -835,8 +943,15 @@ export const register: Register = (on, options) => {
     void $.ui.open({ id: PANE, title: 'Theo dõi agent' }).catch(() => {})
     tick?.cancel()
     runtime.lastUsage = runtime.lastCodex = -Infinity
-    tick = $.clock.every(3000, () => { void refresh($, runtime).catch(() => {}) })
+    if (cliPoll) cliPoll.stopped = true
+    const poll: ClaudeCliPoll = { last: -Infinity, pending: false, stopped: false }
+    cliPoll = poll
+    tick = $.clock.every(3000, () => {
+      void refresh($, runtime).catch(() => {})
+      void safely(() => pollClaudeCli($, poll, funRuntime))
+    })
     void refresh($, runtime).catch(() => {})
+    void safely(() => pollClaudeCli($, poll, funRuntime))
     return await next(e)
   })
 
@@ -844,6 +959,7 @@ export const register: Register = (on, options) => {
     // /clear và resume giữ process sống và không phát lại session.start.
     if (e.reason !== 'clear' && e.reason !== 'resume') {
       tick?.cancel()
+      if (cliPoll) cliPoll.stopped = true
       funRuntime.tick?.cancel()
       funRuntime.at = undefined
     }
@@ -930,6 +1046,8 @@ export const register: Register = (on, options) => {
       await recordCli(error, true)
       throw error
     } finally {
+      const poll = cliPoll
+      if (isClaudeCli && poll) void safely(() => pollClaudeCli($, poll, funRuntime, true))
       runtime.agentsRevision++
       await safely(() => change($, funRuntime, state => {
         const row = state.agents.find(agent => agent.id === id)
@@ -1155,7 +1273,9 @@ export const register: Register = (on, options) => {
     const scheduled = state.scheduled ?? []
     const codexRows = state.codex?.limits
       ? 2 + Number(!!state.codex.limits.primary) + Number(!!state.codex.limits.secondary) + Number(state.codex.limits.reached) : 2
-    const baseRows = 10 + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
+    const cliLimits = state.claudeCliLimits
+    const cliRows = (cliLimits ? 4 + Number(!!cliLimits.opusWeek) : 2) + Number(!!state.claudeCliLoginExpired)
+    const baseRows = 7 + cliRows + codexRows + Math.max(1, state.codex?.runs.length ?? 0) + Math.max(1, state.limits.length) + agents.length * 2
       + (e.props.view.agentId ? 1 : 0) + 1 + Math.max(1, backgroundShown.length) + (scheduled.length ? 1 + scheduled.length : 0)
       + (Svg ? 2 : 3)
     const feedRoom = Math.max(0, (e.viewport?.rows ?? 24) - baseRows)
@@ -1168,6 +1288,9 @@ export const register: Register = (on, options) => {
     const totalTokens = state.agents.reduce((sum, row) => sum + row.tokens, 0)
       + (state.codex?.runs.reduce((sum, run) => sum + (run.tokens ?? 0), 0) ?? 0)
     const activityBar = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="4" viewBox="0 0 240 4"><rect width="240" height="4" fill="#e7ddc6"/><rect width="48" height="4" fill="#79a49b"><animate attributeName="x" values="-48;240" dur="2s" repeatCount="indefinite"/></rect></svg>'
+    const cliIdentity = cliLimits?.identity ? ` · ${cliLimits.identity}` : ''
+    const cliLimitLabel = (agent: OfficeAgent) => cliLimits
+      ? `Limit Claude CLI${cliIdentity} · ${agentLimitText(agent.limit, false)}` : NO_CLAUDE_CLI_LIMITS
     const cards = (rows: typeof scene.agents, small: boolean) => rows.map(agent => {
       const type = agent.kind === 'main' ? 'Claude Code' : agent.kind === 'codex' ? 'Codex CLI'
         : agent.kind === 'claude-cli' ? 'Claude CLI' : 'Agent con Claude'
@@ -1177,7 +1300,8 @@ export const register: Register = (on, options) => {
       const { binding, share, account } = agent.limit
       const limitColor = binding === null ? undefined : binding < 5 ? 'error' : binding < 20 ? 'warning' : undefined
       const limitDetail = agentLimitText(agent.limit, !small)
-      const limitLabel = `Limit ${account === 'codex' ? 'Codex' : 'Claude'} · ${limitDetail}`
+      const limitLabel = account === 'claude-cli' ? cliLimitLabel(agent)
+        : `Limit ${account === 'codex' ? 'Codex' : 'Claude'} · ${limitDetail}`
       return <Box key={`card:${agent.id}`} flexDirection="row" gap={1} padding={1} borderStyle="round" borderColor="subtle">
         {Svg && <Svg source={renderAvatarSvg(agent.lookSeed, agent.kind)} alt={`Chân dung ${agent.name}`} width={36} height={36} />}
         <Box flexDirection="column" flexGrow={1}>
@@ -1204,6 +1328,13 @@ export const register: Register = (on, options) => {
       const filled = Math.round(left / 10)
       return <Text color={left < 5 ? 'error' : left < 20 ? 'warning' : undefined}>
         {limitLabel(limit.kind)} [{ '█'.repeat(filled) + '░'.repeat(10 - filled) }] {left}% còn lại · {limit.reset}
+      </Text>
+    }
+    const usageWindowRow = (window: CodexWindow, label?: string) => {
+      const left = remaining(window.usedPercent)
+      const expired = usageWindowExpired(window, now)
+      return <Text dimColor={expired} color={expired ? undefined : left < 5 ? 'error' : left < 20 ? 'warning' : undefined}>
+        {label ? usageWindowText(window, now, label, 'chờ lần cập nhật tiếp theo') : codexWindowText(window, now)}
       </Text>
     }
     return (
@@ -1260,27 +1391,23 @@ export const register: Register = (on, options) => {
         {state.limits.length === 0 && <Text dimColor>{EMPTY_LIMITS}</Text>}
         {state.limits.map(claudeLimitRow)}
         <Text>Context phiên này: {state.contextRemaining === null ? 'Chưa có dữ liệu' : `${state.contextRemaining}% còn lại`}</Text>
-        <Text bold>Claude CLI</Text>
-        {['five_hour', 'seven_day'].map(kind => {
-          const limit = state.limits.find(item => item.kind === kind)
-          return limit ? claudeLimitRow(limit) : <Text dimColor>{limitLabel(kind)} · Chưa có dữ liệu</Text>
-        })}
-        <Text dimColor>Dùng chung limit tài khoản Claude với Claude Code</Text>
+        <Text bold>Claude CLI{cliIdentity}</Text>
+        {state.claudeCliLoginExpired && <Text color="warning">{CLAUDE_CLI_LOGIN_EXPIRED}</Text>}
+        {!cliLimits && <Text dimColor>{NO_CLAUDE_CLI_LIMITS}</Text>}
+        {cliLimits && <Box flexDirection="column">
+          {cliLimits.fiveHour ? usageWindowRow(cliLimits.fiveHour, '5 giờ') : <Text dimColor>5 giờ · Chưa có dữ liệu</Text>}
+          {cliLimits.week ? usageWindowRow(cliLimits.week, 'Tuần') : <Text dimColor>Tuần · Chưa có dữ liệu</Text>}
+          {cliLimits.opusWeek && usageWindowRow(cliLimits.opusWeek, 'Tuần Opus')}
+          <Text dimColor>Cập nhật lúc {clockText(cliLimits.updatedAt)}</Text>
+        </Box>}
         <Text bold>Codex CLI{state.codex?.limits?.plan ? ` · ${state.codex.limits.plan}` : ''}</Text>
         {!state.codex?.limits && <Text dimColor>Chưa có dữ liệu limit Codex</Text>}
         {state.codex?.limits && <Box flexDirection="column">
-          {[state.codex.limits.primary, state.codex.limits.secondary].map(window => {
-            if (!window) return null
-            const left = remaining(window.usedPercent)
-            const expired = window.resetsAt !== undefined && window.resetsAt * 1000 <= now
-            return <Text dimColor={expired} color={expired ? undefined : left < 5 ? 'error' : left < 20 ? 'warning' : undefined}>
-              {codexWindowText(window, now)}
-            </Text>
-          })}
+          {[state.codex.limits.primary, state.codex.limits.secondary].map(window => window ? usageWindowRow(window) : null)}
           {state.codex.limits.reached && <Text color="warning">Đã chạm limit</Text>}
           <Text dimColor>Cập nhật lúc {clockText(state.codex.limits.updatedAt)} (theo lần gọi Codex gần nhất)</Text>
         </Box>}
-        <Text dimColor>Limit tính theo tài khoản; Claude CLI và các agent con của Claude dùng chung limit Claude.</Text>
+        <Text dimColor>Mỗi nhóm hiển thị limit của tài khoản tương ứng. Các agent con của Claude dùng chung limit Claude Code.</Text>
 
         {Svg ? <>
           <Text bold>Đang làm · {working.length}</Text>
@@ -1309,7 +1436,7 @@ export const register: Register = (on, options) => {
         {scene.agents.filter(agent => agent.kind === 'claude-cli').map(agent => <Box key={agent.id} flexDirection="column">
           <Text bold>{agent.name}</Text>
           <Text>{agent.status === 'idle' ? STATUS.idle : agent.status === 'running' ? STATUS.running : STATUS.completed} · {agent.task} · {agentUsageText(agent)}</Text>
-          <Text>Limit Claude · {agentLimitText(agent.limit, false)}</Text>
+          <Text>{cliLimitLabel(agent)}</Text>
         </Box>)}
         </>}
         {canView && e.props.view.agentId && <Button key="main" label="Về Claude Code" onPress={() => {}} />}

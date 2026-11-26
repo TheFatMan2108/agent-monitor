@@ -1,6 +1,7 @@
 {
   "name": "agent-monitor",
-  "version": "0.10.1",
+  "version": "0.11.0",
+  "network": { "hosts": ["api.anthropic.com"] },
   "license": "MIT",
   "icon": "./.claude-plugin/icon.png",
   "description": "Pane theo dõi limit, tiến độ và tương tác của Claude Code, Claude CLI và Codex CLI.",
