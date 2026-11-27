@@ -236,12 +236,22 @@ export function parseClaudeCliUsage(text: string, updatedAt: number): ClaudeCliL
 
 async function readClaudeCliLimits($: CoreEngineInterface): Promise<ClaudeCliLimits | 'expired' | null> {
   try {
-    const configured = await $.env.get('CLAUDE_CONFIG_DIR')
-    const profile = configured ? undefined : await $.env.get('USERPROFILE')
-    const home = configured || (profile ? `${profile}/.claude` : '')
-    if (!home) return null
-    const directory = home.replace(/[\\/]+$/, '')
-    const oauth = object(object(JSON.parse(await $.fs.read(`${directory}/.credentials.json`)))?.claudeAiOauth)
+    const profile = (await $.env.get('USERPROFILE'))?.replace(/[\\/]+$/, '')
+    const defaultDirectory = profile ? `${profile}/.claude` : ''
+    let directory = await $.env.get('AGENT_MONITOR_CLAUDE_CLI_DIR')
+    let credentials: string | undefined
+    if (!directory && profile) {
+      const cliDirectory = `${profile}/.claude-cli`
+      try {
+        credentials = await $.fs.read(`${cliDirectory}/.credentials.json`)
+        directory = cliDirectory
+      } catch { /* Fall back when the dedicated credentials cannot be read. */ }
+    }
+    directory ||= await $.env.get('CLAUDE_CONFIG_DIR') || defaultDirectory
+    if (!directory) return null
+    directory = directory.replace(/[\\/]+$/, '')
+    credentials ??= await $.fs.read(`${directory}/.credentials.json`)
+    const oauth = object(object(JSON.parse(credentials))?.claudeAiOauth)
     if (finite(oauth?.expiresAt) && oauth.expiresAt <= await $.clock.now()) return 'expired'
     const token = oauth?.accessToken
     if (typeof token !== 'string' || !token || /\s/.test(token)) return null
@@ -265,7 +275,8 @@ async function readClaudeCliLimits($: CoreEngineInterface): Promise<ClaudeCliLim
     const limits = parseClaudeCliUsage(response.text, await $.clock.now())
     if (!limits) return null
     try {
-      const accountPath = configured ? `${directory}/.claude.json` : `${profile}/.claude.json`
+      const isDefaultDirectory = directory.replace(/\\/g, '/') === defaultDirectory.replace(/\\/g, '/')
+      const accountPath = `${isDefaultDirectory ? profile : directory}/.claude.json`
       const account = object(object(JSON.parse(await $.fs.read(accountPath)))?.oauthAccount)
       for (const value of [account?.emailAddress, account?.displayName]) {
         if (typeof value !== 'string' || value.includes(token)) continue

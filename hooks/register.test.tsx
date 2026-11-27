@@ -952,7 +952,7 @@ test('fallback đọc Codex và Claude CLI dưới USERPROFILE', async ($, on) =
     text: codexLine('event_msg', { type: 'task_complete' }),
   }])
   mockCodexFiles(on, fixture, false, async path => {
-    if (path === 'C:/profile/.claude/.credentials.json') {
+    if (path === 'C:/profile/.claude/.credentials.json' || path === 'C:/profile/.claude-cli/.credentials.json') {
       fixture.reads.push(path)
       throw new Error('ENOENT')
     }
@@ -962,9 +962,43 @@ test('fallback đọc Codex và Claude CLI dưới USERPROFILE', async ($, on) =
   await clock.settle()
   expect(snapshot().codex?.runs[0]?.status).toBe('completed')
   expect(fixture.reads.sort()).toEqual([
-    'C:/profile/.claude/.credentials.json', 'C:/profile/.codex/sessions/2026/11/09/rollout-fallback.jsonl',
+    'C:/profile/.claude-cli/.credentials.json', 'C:/profile/.claude/.credentials.json',
+    'C:/profile/.codex/sessions/2026/11/09/rollout-fallback.jsonl',
   ])
 })
+
+for (const [branch, env, directory, accountPath, probes] of [
+  ['override', { AGENT_MONITOR_CLAUDE_CLI_DIR: 'C:/override', CLAUDE_CONFIG_DIR: 'C:/legacy' },
+    'C:/override', 'C:/override/.claude.json', []],
+  ['thư mục riêng', { CLAUDE_CONFIG_DIR: 'C:/legacy' },
+    'C:/profile/.claude-cli', 'C:/profile/.claude-cli/.claude.json', []],
+  ['fallback CLAUDE_CONFIG_DIR', { CLAUDE_CONFIG_DIR: 'C:/legacy' },
+    'C:/legacy', 'C:/legacy/.claude.json', ['C:/profile/.claude-cli/.credentials.json']],
+  ['fallback mặc định', {},
+    'C:/profile/.claude', 'C:/profile/.claude.json', ['C:/profile/.claude-cli/.credentials.json']],
+] as const) {
+  test(`Claude CLI chọn credentials và hồ sơ theo nhánh ${branch}`, async ($, on) => {
+    const { clock, snapshot } = setup(on, { env: { ...env, USERPROFILE: 'C:/profile' } })
+    const credentialsPath = `${directory}/.credentials.json`
+    const paths: string[] = []
+    on('fs.read', (_, e) => {
+      const path = e.path.replace(/\\/g, '/')
+      paths.push(path)
+      if (path === credentialsPath) {
+        return { value: JSON.stringify({ claudeAiOauth: { accessToken: CLI_TOKEN } }) }
+      }
+      if (path === accountPath) {
+        return { value: JSON.stringify({ oauthAccount: { displayName: 'Hồ sơ CLI' } }) }
+      }
+      throw new Error('ENOENT')
+    })
+    on('http.fetch', () => ({ value: { ok: true, status: 200, headers: {}, text: CLI_USAGE } }))
+    await start($)
+    await clock.settle()
+    expect(paths).toEqual([...probes, credentialsPath, accountPath])
+    expect(snapshot().claudeCliLimits?.identity).toBe('Hồ sơ CLI')
+  })
+}
 
 test('Claude CLI chưa được gọi vẫn hiện trạng thái rảnh và limit trong văn phòng, thẻ và pane chữ', async ($, on) => {
   const { clock, snapshot } = setup(on, {
@@ -1022,6 +1056,7 @@ test('poll hạn mức Claude CLI theo tài khoản, bảo vệ token và giới
   on('fs.read', (_, e) => {
     const path = e.path.replace(/\\/g, '/')
     paths.push(path)
+    if (path === 'C:/ignored/.claude-cli/.credentials.json') throw new Error('ENOENT')
     if (path === 'C:/cli-config/.credentials.json') {
       reads++
       return { value: JSON.stringify({ claudeAiOauth: { accessToken: CLI_TOKEN, refreshToken: 'PRIVATE_REFRESH', expiresAt } }) }
@@ -1050,7 +1085,9 @@ test('poll hạn mức Claude CLI theo tài khoản, bảo vệ token và giới
   }
   await start($)
   await clock.settle()
-  expect(paths.filter(path => path.endsWith('/.credentials.json'))).toEqual(['C:/cli-config/.credentials.json'])
+  expect(paths.filter(path => path.endsWith('/.credentials.json'))).toEqual([
+    'C:/ignored/.claude-cli/.credentials.json', 'C:/cli-config/.credentials.json',
+  ])
   expect(reads).toBe(1)
   expect(requests).toEqual([])
   expect(snapshot().claudeCliLoginExpired).toBe(true)

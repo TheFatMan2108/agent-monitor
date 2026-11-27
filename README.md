@@ -65,6 +65,14 @@ claude plugin install agent-monitor --marketplace TheFatMan2108/agent-monitor
 
 Trong ứng dụng desktop, nơi `/plugin` không chạy: bấm **+** cạnh ô nhập, chọn **Plugins**, **Add marketplace** với `TheFatMan2108/agent-monitor`, rồi **Add plugin**.
 
+Claude Desktop có thể ghi đè cấu hình trong `~/.claude`. Để dùng tài khoản riêng cho Claude CLI trên Windows, đặt `CLAUDE_CONFIG_DIR` trong mục `env` của MCP `claude-code` thành đường dẫn tuyệt đối tới `%USERPROFILE%\.claude-cli`. Đăng nhập vào cùng thư mục từ PowerShell:
+
+```powershell
+$env:CLAUDE_CONFIG_DIR="$env:USERPROFILE\.claude-cli"; claude auth login
+```
+
+Nếu dùng thư mục riêng khác, đặt `AGENT_MONITOR_CLAUDE_CLI_DIR` trong môi trường chạy Agent Monitor thành đường dẫn tới thư mục đó.
+
 ## Sử dụng
 
 Pane tự mở khi phiên bắt đầu. Nếu đã đóng, gõ `/agent-monitor` để mở lại.
@@ -76,7 +84,7 @@ Mod quan sát phiên hiện tại và kết nối `api.anthropic.com` để lấ
 | Dữ liệu | Lấy từ |
 | --- | --- |
 | Limit và context của Claude | API của Claude Code (`$.session.usage`) |
-| Limit Claude CLI | `~/.claude/.credentials.json` (hoặc thư mục `CLAUDE_CONFIG_DIR`) và `api.anthropic.com/api/oauth/usage` |
+| Limit Claude CLI | `.credentials.json` trong thư mục cấu hình CLI và `api.anthropic.com/api/oauth/usage` |
 | Subagent, công cụ, tin nhắn, task ngầm, lịch | Sự kiện trong phiên Claude hiện tại |
 | Tiến trình Claude CLI | Sự kiện `tool.call` trong phiên hiện tại |
 | Limit và tiến trình Codex | `~/.codex/sessions/**/rollout-*.jsonl` (hoặc `CODEX_HOME`) |
@@ -84,6 +92,7 @@ Mod quan sát phiên hiện tại và kết nối `api.anthropic.com` để lấ
 - Không đọc `auth.json` hay `config.toml`.
 - Từ log Codex chỉ lấy tên công cụ, trạng thái, số token, số liệu limit và tên thư mục. Không lưu nội dung hội thoại, tham số hay kết quả công cụ.
 - Mod không đọc transcript Claude CLI. Từ lượt gọi MCP, mod giữ tên thư mục cuối thay cho đường dẫn và chỉ ghi trạng thái kết quả vào feed.
+- Mod ưu tiên `AGENT_MONITOR_CLAUDE_CLI_DIR`, sau đó dùng `%USERPROFILE%\.claude-cli` nếu đọc được `.credentials.json`, rồi mới dùng `CLAUDE_CONFIG_DIR` của phiên mod hoặc `%USERPROFILE%\.claude`. Hồ sơ `.claude.json` nằm trong thư mục đã chọn. Với thư mục mặc định `%USERPROFILE%\.claude`, hồ sơ nằm ở `%USERPROFILE%\.claude.json`.
 - Mod đọc access token của Claude CLI và dùng `$.http.fetch` tới đúng một host, `api.anthropic.com`, để lấy phần trăm limit và giờ reset. Token chỉ nằm trong bộ nhớ khi đọc số liệu. Tên hiển thị lấy từ `oauthAccount` trong `.claude.json` nếu có.
 - Feed lưu tối đa 120 ký tự đầu của tin nhắn hoặc task, và chỉ trong bộ nhớ của phiên.
 
